@@ -1,10 +1,14 @@
 """
-CSV Parser Module
+Enhanced CSV Parser Module
 
-Handles CSV file ingestion with flexible column mapping,
-validation, and profile generation.
+Handles StackOverflow dataset with 28 columns, including:
+- Multi-value skill columns (semicolon-separated)
+- Personality text extraction
+- Role normalization for "Other" values
+- Availability parsing
 """
 
+import re
 import uuid
 import logging
 from typing import Dict, List, Optional, Any, IO
@@ -14,254 +18,431 @@ import pandas as pd
 
 from .normalizer import normalizer
 
-# Configure logging
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class CSVColumnMapping:
-    """Configuration for mapping CSV columns to profile fields."""
-    name: str = "Name"
-    role: str = "Role"
-    experience: str = "Experience"
-    skills: str = "Skills"
-    tools: str = "Tools"
-    industry: str = "Industry"
-    availability: str = "Availability"
-    belbin_role: str = "Belbin"
-    communication_style: str = "CommunicationStyle"
+# StackOverflow column mapping to our schema
+STACKOVERFLOW_COLUMN_MAP = {
+    # Direct mappings
+    "Candidate ID": "id",
+    "Employment": "employment",
+    "YearsCode": "years_code",
+    "DevType": "dev_type",
+    "OrgSize": "org_size",
+    "WorkExp": "work_experience_years",
+    "Industry": "industry",
+    "WeeklyAvailabilityHours": "weekly_availability_hours",
+    "PersonalityText": "personality_text",
+    "ICorPM": "ic_or_pm",
     
-    # Alternative column names to check
-    alternatives: Dict[str, List[str]] = field(default_factory=lambda: {
-        "name": ["Name", "Full Name", "FullName", "Candidate Name", "Employee Name"],
-        "role": ["Role", "Title", "Job Title", "Position", "Job Role"],
-        "experience": ["Experience", "Years Experience", "YearsExp", "Exp", "Work Experience"],
-        "skills": ["Skills", "Technical Skills", "Programming Languages", "Technologies"],
-        "tools": ["Tools", "Platforms", "Software", "Tech Stack"],
-        "industry": ["Industry", "Domain", "Sector"],
-        "availability": ["Availability", "Hours", "Weekly Hours"],
-        "belbin_role": ["Belbin", "Team Role", "Belbin Role"],
-    })
+    # Skill columns (will be merged)
+    "LanguageHaveWorkedWith": "languages",
+    "DatabaseHaveWorkedWith": "databases",
+    "PlatformHaveWorkedWith": "platforms",
+    "WebframeHaveWorkedWith": "webframes",
+    "MiscTechHaveWorkedWith": "misc_tech",
+    "ToolsTechHaveWorkedWith": "tools_tech",
+    "NEWCollabToolsHaveWorkedWith": "collab_tools",
+    
+    # Additional context columns
+    "LanguageAdmired": "languages_admired",
+    "OpSysPersonalUse": "os_personal",
+    "AIToolCurrentlyUsing": "ai_tools_using",
+    "AISearchDevHaveWorkedWith": "ai_search_tools",
+    "ProfessionalTech": "professional_tech",
+    "ProfessionalCloud": "professional_cloud",
+    "Frustration": "frustrations",
+}
+
+# Standard roles for mapping "Other" values
+STANDARD_ROLES = [
+    "Developer, full-stack",
+    "Developer, back-end",
+    "Developer, front-end",
+    "Developer, mobile",
+    "Developer, embedded applications or devices",
+    "DevOps specialist",
+    "Engineer, site reliability",
+    "Cloud infrastructure engineer",
+    "Data engineer",
+    "Data scientist or machine learning specialist",
+    "Developer, AI",
+    "Developer, QA or test",
+    "Developer, desktop or enterprise applications",
+    "Product manager",
+    "Project manager",
+    "Security professional",
+    "Data or business analyst",
+    "Research & Development role",
+    "System administrator",
+]
+
+# Belbin role keywords for extraction from personality text
+BELBIN_KEYWORDS = {
+    "Plant": ["creative", "innovative", "ideas", "unconventional", "solving difficult problems"],
+    "Resource Investigator": ["curious", "exploring", "opportunities", "networking", "contacts"],
+    "Co-ordinator": ["clarifies goals", "delegates", "mature", "confident", "chairperson"],
+    "Shaper": ["challenging", "dynamic", "pressure", "drive", "courage"],
+    "Monitor Evaluator": ["strategic", "analytical", "judges", "critical thinking", "objective"],
+    "Teamworker": ["supportive", "cooperative", "diplomatic", "team working", "harmony"],
+    "Implementer": ["practical", "reliable", "efficient", "organizer", "systematic"],
+    "Completer Finisher": ["conscientious", "perfectionist", "attention to detail", "quality", "thorough"],
+    "Specialist": ["dedicated", "expert", "specialized", "deep knowledge", "technical expertise"],
+}
 
 
-class CSVParser:
+def parse_semicolon_list(value: Any) -> List[str]:
+    """Parse semicolon-separated string into list."""
+    if pd.isna(value) or not value:
+        return []
+    return [item.strip() for item in str(value).split(";") if item.strip()]
+
+
+def parse_availability(value: Any) -> Dict[str, Any]:
     """
-    Parses CSV files into structured employee profiles.
+    Parse availability string like "10–20" or "40+" into structured format.
+    Returns dict with min_hours, max_hours, and original string.
+    """
+    if pd.isna(value) or not value:
+        return {"min_hours": 0, "max_hours": 40, "display": "Not specified"}
     
-    Supports flexible column mapping and handles various CSV formats.
+    value_str = str(value).strip()
     
-    Example:
-        parser = CSVParser()
-        profiles = parser.parse_csv(uploaded_file)
+    # Handle various formats: "10–20", "10-20", "40+", "40"
+    # Note: StackOverflow uses en-dash (–) not hyphen (-)
+    range_match = re.match(r'(\d+)\s*[–\-]\s*(\d+)', value_str)
+    if range_match:
+        min_h = int(range_match.group(1))
+        max_h = int(range_match.group(2))
+        return {"min_hours": min_h, "max_hours": max_h, "display": value_str}
+    
+    plus_match = re.match(r'(\d+)\+', value_str)
+    if plus_match:
+        min_h = int(plus_match.group(1))
+        return {"min_hours": min_h, "max_hours": 60, "display": value_str}
+    
+    single_match = re.match(r'(\d+)', value_str)
+    if single_match:
+        hours = int(single_match.group(1))
+        return {"min_hours": hours, "max_hours": hours, "display": value_str}
+    
+    return {"min_hours": 0, "max_hours": 40, "display": value_str}
+
+
+def extract_belbin_from_text(personality_text: str) -> str:
+    """
+    Extract Belbin team role from personality text using keyword matching.
+    """
+    if not personality_text or pd.isna(personality_text):
+        return "Teamworker"  # Default
+    
+    text_lower = personality_text.lower()
+    
+    # Check for explicit Belbin mention
+    for role in BELBIN_KEYWORDS.keys():
+        if role.lower() in text_lower:
+            return role
+        # Check for hyphenated version
+        if role.lower().replace(" ", "-") in text_lower:
+            return role
+    
+    # Keyword scoring
+    scores = {}
+    for role, keywords in BELBIN_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw.lower() in text_lower)
+        if score > 0:
+            scores[role] = score
+    
+    if scores:
+        return max(scores, key=scores.get)
+    
+    return "Teamworker"
+
+
+def extract_communication_style(personality_text: str) -> str:
+    """Extract communication style from personality text."""
+    if not personality_text or pd.isna(personality_text):
+        return "Mixed"
+    
+    text_lower = personality_text.lower()
+    
+    if "written" in text_lower or "async" in text_lower or "messages" in text_lower:
+        return "Indirect"
+    if "meetings" in text_lower or "face to face" in text_lower or "verbal" in text_lower:
+        return "Direct"
+    if "mix" in text_lower or "adapt" in text_lower:
+        return "Mixed"
+    
+    return "Mixed"
+
+
+def extract_leadership_preference(personality_text: str, ic_or_pm: str = None) -> str:
+    """Extract leadership preference from personality text and role."""
+    if ic_or_pm and "manager" in str(ic_or_pm).lower():
+        return "Lead"
+    
+    if not personality_text or pd.isna(personality_text):
+        return "Neutral"
+    
+    text_lower = personality_text.lower()
+    
+    if "take the lead" in text_lower or "organize" in text_lower or "direction" in text_lower:
+        return "Lead"
+    if "shared ownership" in text_lower or "together" in text_lower:
+        return "Co-lead"
+    if "follow" in text_lower or "support" in text_lower:
+        return "Follow"
+    if "autonomous" in text_lower or "independent" in text_lower:
+        return "Autonomous"
+    
+    return "Neutral"
+
+
+def extract_conflict_style(personality_text: str) -> str:
+    """Extract conflict handling style from personality text."""
+    if not personality_text or pd.isna(personality_text):
+        return "Collaborate"
+    
+    text_lower = personality_text.lower()
+    
+    if "avoid" in text_lower or "step back" in text_lower or "don't like" in text_lower:
+        return "Avoid"
+    if "collaborate" in text_lower or "work together" in text_lower:
+        return "Collaborate"
+    if "compromise" in text_lower or "middle ground" in text_lower:
+        return "Compromise"
+    if "constructive" in text_lower or "feedback" in text_lower:
+        return "Collaborate"
+    
+    return "Collaborate"
+
+
+def extract_deadline_discipline(personality_text: str) -> str:
+    """Extract deadline discipline from personality text."""
+    if not personality_text or pd.isna(personality_text):
+        return "Flexible"
+    
+    text_lower = personality_text.lower()
+    
+    if "strict" in text_lower or "hard to stick" in text_lower or "motivate" in text_lower:
+        return "Strict"
+    if "depends" in text_lower or "impact" in text_lower or "workload" in text_lower:
+        return "Flexible"
+    if "flexible" in text_lower:
+        return "Flexible"
+    
+    return "Flexible"
+
+
+class StackOverflowCSVParser:
+    """
+    Parser for StackOverflow-format CSV files.
+    
+    Handles all 28 columns and converts to our profile schema.
     """
     
-    def __init__(self, column_mapping: CSVColumnMapping = None):
+    def __init__(self, llm_client=None, llm_model: str = None):
         """
-        Initialize CSV parser.
+        Initialize parser.
         
         Args:
-            column_mapping: Custom column mapping configuration
+            llm_client: Optional OpenAI client for role mapping
+            llm_model: Model to use for role mapping
         """
-        self.mapping = column_mapping or CSVColumnMapping()
+        self.llm_client = llm_client
+        self.llm_model = llm_model
         self.normalizer = normalizer
     
-    def _find_column(self, df: pd.DataFrame, field_name: str) -> Optional[str]:
+    def map_other_role(self, role_text: str, context: Dict[str, Any] = None) -> str:
         """
-        Find a column in DataFrame, checking alternatives.
-        
-        Args:
-            df: DataFrame to search
-            field_name: Field name to find
-            
-        Returns:
-            Actual column name found, or None
+        Map "Other (please specify):" roles to standard roles using LLM.
         """
-        alternatives = self.mapping.alternatives.get(field_name, [])
+        if not role_text or "other" not in role_text.lower():
+            return role_text
         
-        # Check primary name first
-        primary = getattr(self.mapping, field_name, None)
-        if primary and primary in df.columns:
-            return primary
+        if not self.llm_client:
+            # Fallback: use skills context to guess
+            if context:
+                skills = context.get("skills", [])
+                if any("data" in s.lower() or "ml" in s.lower() or "tensorflow" in s.lower() for s in skills):
+                    return "Data scientist or machine learning specialist"
+                if any("devops" in s.lower() or "kubernetes" in s.lower() or "docker" in s.lower() for s in skills):
+                    return "DevOps specialist"
+                if any("mobile" in s.lower() or "flutter" in s.lower() or "react native" in s.lower() for s in skills):
+                    return "Developer, mobile"
+            return "Developer, full-stack"
         
-        # Check alternatives
-        for alt in alternatives:
-            if alt in df.columns:
-                return alt
-            # Case-insensitive check
-            for col in df.columns:
-                if col.lower() == alt.lower():
-                    return col
-        
-        return None
-    
-    def _parse_skills_string(self, skills_str: Any) -> List[str]:
-        """Parse skills from various string formats."""
-        if pd.isna(skills_str) or not skills_str:
-            return []
-        
-        skills_str = str(skills_str)
-        
-        # Try different delimiters
-        for delimiter in [",", ";", "|", "\n"]:
-            if delimiter in skills_str:
-                skills = [s.strip() for s in skills_str.split(delimiter)]
-                return self.normalizer.normalize_skills([s for s in skills if s])
-        
-        # Single skill
-        return self.normalizer.normalize_skills([skills_str.strip()])
-    
-    def _parse_experience(self, exp_value: Any) -> str:
-        """Parse experience value to string format."""
-        if pd.isna(exp_value):
-            return "2.0"
-        
+        # Use LLM for mapping
+        prompt = f"""Map this developer role to the closest standard role.
+
+Original role: "{role_text}"
+Context skills: {context.get('skills', []) if context else 'None'}
+
+Standard roles (choose ONE):
+{chr(10).join(f"- {r}" for r in STANDARD_ROLES)}
+
+Return ONLY the exact role name from the list above, nothing else."""
+
         try:
-            # Handle numeric values
-            if isinstance(exp_value, (int, float)):
-                return str(float(exp_value))
-            
-            # Handle string values like "5 years" or "5+"
-            exp_str = str(exp_value).lower()
-            import re
-            numbers = re.findall(r'\d+\.?\d*', exp_str)
-            if numbers:
-                return str(float(numbers[0]))
-            
-            return "2.0"
-        except (ValueError, TypeError):
-            return "2.0"
+            response = self.llm_client.chat.completions.create(
+                model=self.llm_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=50
+            )
+            mapped = response.choices[0].message.content.strip()
+            # Validate it's in our list
+            if mapped in STANDARD_ROLES:
+                return mapped
+            # Try partial match
+            for role in STANDARD_ROLES:
+                if role.lower() in mapped.lower() or mapped.lower() in role.lower():
+                    return role
+            return "Developer, full-stack"
+        except Exception as e:
+            logger.warning(f"LLM role mapping failed: {e}")
+            return "Developer, full-stack"
     
-    def validate_csv(self, df: pd.DataFrame) -> Dict[str, Any]:
+    def parse_row(self, row: pd.Series, use_llm_for_roles: bool = True) -> Dict[str, Any]:
         """
-        Validate CSV structure and content.
+        Parse a single CSV row into profile schema.
+        """
+        # Collect all skills from multiple columns
+        all_skills = []
+        all_skills.extend(parse_semicolon_list(row.get("LanguageHaveWorkedWith", "")))
+        all_skills.extend(parse_semicolon_list(row.get("DatabaseHaveWorkedWith", "")))
+        all_skills.extend(parse_semicolon_list(row.get("PlatformHaveWorkedWith", "")))
+        all_skills.extend(parse_semicolon_list(row.get("WebframeHaveWorkedWith", "")))
+        all_skills.extend(parse_semicolon_list(row.get("MiscTechHaveWorkedWith", "")))
         
-        Args:
-            df: DataFrame to validate
-            
-        Returns:
-            Validation result with errors and warnings
-        """
-        result = {
-            "valid": True,
-            "errors": [],
-            "warnings": [],
-            "row_count": len(df),
-            "columns_found": list(df.columns)
+        # Normalize skills
+        all_skills = self.normalizer.normalize_skills(all_skills)
+        
+        # Tools from dedicated column
+        tools = parse_semicolon_list(row.get("ToolsTechHaveWorkedWith", ""))
+        tools.extend(parse_semicolon_list(row.get("NEWCollabToolsHaveWorkedWith", "")))
+        tools = list(set(tools))  # Dedupe
+        
+        # Parse availability
+        availability = parse_availability(row.get("WeeklyAvailabilityHours", ""))
+        
+        # Extract personality traits from text
+        personality_text = str(row.get("PersonalityText", "")) if pd.notna(row.get("PersonalityText")) else ""
+        ic_or_pm = str(row.get("ICorPM", "")) if pd.notna(row.get("ICorPM")) else ""
+        
+        # Handle role
+        raw_role = str(row.get("DevType", "Developer, full-stack")) if pd.notna(row.get("DevType")) else "Developer, full-stack"
+        
+        context = {"skills": all_skills, "tools": tools}
+        
+        if "other" in raw_role.lower() and use_llm_for_roles:
+            role = self.map_other_role(raw_role, context)
+        else:
+            role = raw_role
+        
+        # Normalize role
+        role = self.normalizer.normalize_role(role)
+        
+        # Parse experience
+        work_exp = row.get("WorkExp", 0)
+        if pd.isna(work_exp):
+            work_exp = row.get("YearsCode", 0)
+        if pd.isna(work_exp):
+            work_exp = 2
+        
+        # Industry handling
+        industry = str(row.get("Industry", "General")) if pd.notna(row.get("Industry")) else "General"
+        if "other" in industry.lower():
+            industry = "Other"
+        
+        # Build profile
+        profile = {
+            "id": str(row.get("Candidate ID", uuid.uuid4())),
+            "name": f"Candidate {row.get('Candidate ID', 'Unknown')}",  # No names in SO data
+            "role": role,
+            "constraints": {
+                "weekly_availability_hours": availability["display"],
+                "min_hours": availability["min_hours"],
+                "max_hours": availability["max_hours"],
+            },
+            "metadata": {
+                "dev_type": role,
+                "work_experience_years": str(float(work_exp) if work_exp else 2),
+                "years_code": str(row.get("YearsCode", 0)) if pd.notna(row.get("YearsCode")) else "0",
+                "employment": str(row.get("Employment", "Employed, full-time")) if pd.notna(row.get("Employment")) else "Employed, full-time",
+                "org_size": str(row.get("OrgSize", "Unknown")) if pd.notna(row.get("OrgSize")) else "Unknown",
+                "industry": industry,
+                "ic_or_pm": ic_or_pm,
+                "professional_cloud": str(row.get("ProfessionalCloud", "")) if pd.notna(row.get("ProfessionalCloud")) else "",
+            },
+            "technical": {
+                "skills": all_skills,
+                "tools": tools,
+                "languages_admired": parse_semicolon_list(row.get("LanguageAdmired", "")),
+                "ai_tools": parse_semicolon_list(row.get("AIToolCurrentlyUsing", "")),
+                "os_preference": parse_semicolon_list(row.get("OpSysPersonalUse", "")),
+            },
+            "personality": {
+                "Belbin_team_role": extract_belbin_from_text(personality_text),
+                "personality_text": personality_text[:500] if personality_text else "",  # Truncate for storage
+            },
+            "collaboration": {
+                "communication_style": extract_communication_style(personality_text),
+                "conflict_style": extract_conflict_style(personality_text),
+                "leadership_preference": extract_leadership_preference(personality_text, ic_or_pm),
+                "deadline_discipline": extract_deadline_discipline(personality_text),
+            },
+            "learning_behavior": {
+                "learning_orientation": "High" if "learning" in personality_text.lower() else "Medium",
+                "knowledge_sharing": "High" if "feedback" in personality_text.lower() or "share" in personality_text.lower() else "Medium",
+            },
+            "context": {
+                "frustrations": str(row.get("Frustration", "")) if pd.notna(row.get("Frustration")) else "",
+                "professional_tech": str(row.get("ProfessionalTech", "")) if pd.notna(row.get("ProfessionalTech")) else "",
+                "ai_ethics_concerns": str(row.get("AIEthics", "")) if pd.notna(row.get("AIEthics")) else "",
+            }
         }
         
-        # Check for required columns
-        name_col = self._find_column(df, "name")
-        if not name_col:
-            result["errors"].append("Missing required column: Name")
-            result["valid"] = False
-        
-        # Check for recommended columns
-        recommended = ["role", "experience", "skills"]
-        for field in recommended:
-            if not self._find_column(df, field):
-                result["warnings"].append(f"Missing recommended column: {field}")
-        
-        # Check for empty rows
-        if df.empty:
-            result["errors"].append("CSV file is empty")
-            result["valid"] = False
-        
-        return result
+        return profile
     
     def parse_csv(
         self,
         file_or_path: Any,
-        validate: bool = True
+        use_llm_for_roles: bool = True,
+        min_availability_hours: int = None
     ) -> List[Dict[str, Any]]:
         """
-        Parse CSV file into list of profile dictionaries.
+        Parse entire CSV file.
         
         Args:
-            file_or_path: File path string, file-like object, or bytes
-            validate: Whether to validate before parsing
+            file_or_path: CSV file path or file-like object
+            use_llm_for_roles: Whether to use LLM for "Other" role mapping
+            min_availability_hours: Filter out candidates below this availability
             
         Returns:
             List of profile dictionaries
         """
-        # Read CSV
         try:
             df = pd.read_csv(file_or_path)
         except Exception as e:
             logger.error(f"Failed to read CSV: {e}")
             raise ValueError(f"Could not read CSV file: {e}")
         
-        # Validate if requested
-        if validate:
-            validation = self.validate_csv(df)
-            if not validation["valid"]:
-                errors = "; ".join(validation["errors"])
-                raise ValueError(f"CSV validation failed: {errors}")
-            
-            for warning in validation.get("warnings", []):
-                logger.warning(warning)
+        logger.info(f"Parsing {len(df)} rows from CSV...")
         
-        # Find columns
-        name_col = self._find_column(df, "name")
-        role_col = self._find_column(df, "role")
-        exp_col = self._find_column(df, "experience")
-        skills_col = self._find_column(df, "skills")
-        tools_col = self._find_column(df, "tools")
-        industry_col = self._find_column(df, "industry")
-        availability_col = self._find_column(df, "availability")
-        belbin_col = self._find_column(df, "belbin_role")
-        
-        # Parse rows
         profiles = []
+        skipped_availability = 0
         
         for idx, row in df.iterrows():
             try:
-                # Extract values with defaults
-                name = row.get(name_col, f"Candidate_{idx}") if name_col else f"Candidate_{idx}"
-                role = row.get(role_col, "Developer, full-stack") if role_col else "Developer, full-stack"
-                experience = self._parse_experience(row.get(exp_col)) if exp_col else "2.0"
-                skills = self._parse_skills_string(row.get(skills_col)) if skills_col else []
-                tools = self._parse_skills_string(row.get(tools_col)) if tools_col else []
-                industry = row.get(industry_col, "General") if industry_col else "General"
-                availability = row.get(availability_col, "40") if availability_col else "40"
-                belbin_role = row.get(belbin_col, "Teamworker") if belbin_col else "Teamworker"
+                profile = self.parse_row(row, use_llm_for_roles)
                 
-                # Normalize role
-                role = self.normalizer.normalize_role(str(role))
-                
-                # Create profile
-                profile = {
-                    "id": str(uuid.uuid4()),
-                    "name": str(name).strip() if pd.notna(name) else f"Candidate_{idx}",
-                    "role": role,
-                    "constraints": {
-                        "weekly_availability_hours": str(availability)
-                    },
-                    "metadata": {
-                        "dev_type": role,
-                        "work_experience_years": experience,
-                        "years_code": experience,
-                        "employment": "Employed, full-time",
-                        "org_size": "Unknown",
-                        "industry": str(industry) if pd.notna(industry) else "General"
-                    },
-                    "technical": {
-                        "skills": skills,
-                        "tools": tools
-                    },
-                    "personality": {
-                        "Belbin_team_role": str(belbin_role) if pd.notna(belbin_role) else "Teamworker"
-                    },
-                    "collaboration": {
-                        "communication_style": "Mixed",
-                        "conflict_style": "Collaborate",
-                        "leadership_preference": "Neutral",
-                        "deadline_discipline": "Flexible"
-                    },
-                    "learning_behavior": {
-                        "learning_orientation": "Medium",
-                        "knowledge_sharing": "Medium"
-                    }
-                }
+                # Filter by availability if specified
+                if min_availability_hours:
+                    max_hours = profile["constraints"].get("max_hours", 40)
+                    if max_hours < min_availability_hours:
+                        skipped_availability += 1
+                        continue
                 
                 profiles.append(profile)
                 
@@ -269,24 +450,111 @@ class CSVParser:
                 logger.warning(f"Failed to parse row {idx}: {e}")
                 continue
         
+        if skipped_availability > 0:
+            logger.info(f"Filtered out {skipped_availability} candidates below {min_availability_hours}h availability")
+        
         logger.info(f"Successfully parsed {len(profiles)} profiles from CSV")
         return profiles
     
-    def generate_sample_csv(self) -> str:
+    def get_column_stats(self, file_or_path: Any) -> Dict[str, Any]:
         """
-        Generate a sample CSV template.
+        Get statistics about the CSV for display.
+        """
+        df = pd.read_csv(file_or_path)
         
-        Returns:
-            CSV content as string
-        """
-        sample_data = """Name,Role,Experience,Skills,Tools,Industry,Belbin
-John Smith,Full-stack Developer,5,Python; JavaScript; React; Node.js,AWS; Docker; Git,Fintech,Implementer
-Sarah Johnson,Data Scientist,3,Python; TensorFlow; SQL; Pandas,Jupyter; AWS; Git,Healthcare,Specialist
-Mike Chen,DevOps Engineer,7,Python; Bash; Kubernetes; Terraform,AWS; GCP; Jenkins,E-commerce,Monitor Evaluator
-Emily Brown,Frontend Developer,2,JavaScript; TypeScript; React; Vue.js,Figma; Git; VSCode,Education,Plant
-"""
-        return sample_data
+        stats = {
+            "total_rows": len(df),
+            "columns": list(df.columns),
+            "column_count": len(df.columns),
+            "missing_values": df.isnull().sum().to_dict(),
+            "unique_roles": df["DevType"].nunique() if "DevType" in df.columns else 0,
+            "other_roles_count": len(df[df["DevType"].str.contains("Other", na=False)]) if "DevType" in df.columns else 0,
+            "industries": df["Industry"].value_counts().to_dict() if "Industry" in df.columns else {},
+            "availability_distribution": df["WeeklyAvailabilityHours"].value_counts().to_dict() if "WeeklyAvailabilityHours" in df.columns else {},
+        }
+        
+        return stats
 
 
-# Singleton instance
-csv_parser = CSVParser()
+# Legacy parser for backward compatibility with simple CSVs
+class SimpleCSVParser:
+    """Simple CSV parser for basic format (Name, Role, Experience, Skills)."""
+    
+    def parse_csv(self, file_or_path: Any) -> List[Dict[str, Any]]:
+        """Parse simple CSV format."""
+        df = pd.read_csv(file_or_path)
+        profiles = []
+        
+        for idx, row in df.iterrows():
+            # Try to detect column names
+            name = row.get("Name") or row.get("name") or f"Candidate {idx+1}"
+            role = row.get("Role") or row.get("role") or "Developer, full-stack"
+            exp = row.get("Experience") or row.get("experience") or row.get("WorkExp") or 2
+            skills_str = row.get("Skills") or row.get("skills") or ""
+            
+            skills = [s.strip() for s in str(skills_str).split(",") if s.strip()]
+            
+            profile = {
+                "id": str(uuid.uuid4()),
+                "name": str(name),
+                "role": normalizer.normalize_role(str(role)),
+                "constraints": {"weekly_availability_hours": "40", "min_hours": 40, "max_hours": 40},
+                "metadata": {
+                    "dev_type": normalizer.normalize_role(str(role)),
+                    "work_experience_years": str(float(exp) if exp else 2),
+                    "industry": "General",
+                },
+                "technical": {
+                    "skills": normalizer.normalize_skills(skills),
+                    "tools": [],
+                },
+                "personality": {"Belbin_team_role": "Teamworker"},
+                "collaboration": {
+                    "communication_style": "Mixed",
+                    "conflict_style": "Collaborate",
+                    "leadership_preference": "Neutral",
+                    "deadline_discipline": "Flexible",
+                },
+                "learning_behavior": {"learning_orientation": "Medium", "knowledge_sharing": "Medium"},
+            }
+            profiles.append(profile)
+        
+        return profiles
+
+
+def detect_csv_format(file_or_path: Any) -> str:
+    """
+    Detect CSV format based on columns.
+    
+    Returns: "stackoverflow" or "simple"
+    """
+    df = pd.read_csv(file_or_path, nrows=1)
+    columns = set(df.columns)
+    
+    stackoverflow_indicators = {"Candidate ID", "DevType", "LanguageHaveWorkedWith", "PersonalityText"}
+    
+    if stackoverflow_indicators & columns:
+        return "stackoverflow"
+    return "simple"
+
+
+# Convenience function
+def parse_csv_auto(file_or_path: Any, llm_client=None, llm_model: str = None, **kwargs) -> List[Dict[str, Any]]:
+    """
+    Auto-detect CSV format and parse accordingly.
+    """
+    # Need to read file twice, so handle file objects
+    if hasattr(file_or_path, 'seek'):
+        file_or_path.seek(0)
+    
+    format_type = detect_csv_format(file_or_path)
+    
+    if hasattr(file_or_path, 'seek'):
+        file_or_path.seek(0)
+    
+    if format_type == "stackoverflow":
+        parser = StackOverflowCSVParser(llm_client=llm_client, llm_model=llm_model)
+        return parser.parse_csv(file_or_path, **kwargs)
+    else:
+        parser = SimpleCSVParser()
+        return parser.parse_csv(file_or_path)

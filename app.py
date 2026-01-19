@@ -1,13 +1,20 @@
 """
-SkillSync AI - Streamlit Application
+SkillSync AI - Enhanced Streamlit Application
 
-Main entry point for the SkillSync team formation web application.
+Features:
+- Dashboard with quick stats
+- Team Builder with teams displayed first
+- Inline evaluation with icons
+- Enhanced Talent Pool for 28-column CSV
+- Non-tech friendly explanations
 """
 
 import streamlit as st
 import pandas as pd
 import time
-from typing import Dict, Any
+import json
+from typing import Dict, Any, List
+from pathlib import Path
 
 # Must be first Streamlit command
 st.set_page_config(
@@ -17,13 +24,72 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Now import our modules
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 20px;
+        border-radius: 10px;
+        color: white;
+        text-align: center;
+        margin: 10px 0;
+    }
+    .metric-value {
+        font-size: 2.5em;
+        font-weight: bold;
+    }
+    .metric-label {
+        font-size: 0.9em;
+        opacity: 0.9;
+    }
+    .team-card {
+        border: 2px solid #e0e0e0;
+        border-radius: 10px;
+        padding: 15px;
+        margin: 10px 0;
+    }
+    .score-excellent { color: #28a745; }
+    .score-good { color: #ffc107; }
+    .score-poor { color: #dc3545; }
+    .status-badge {
+        display: inline-block;
+        padding: 5px 10px;
+        border-radius: 15px;
+        font-size: 0.85em;
+        font-weight: bold;
+    }
+    .badge-success { background: #d4edda; color: #155724; }
+    .badge-warning { background: #fff3cd; color: #856404; }
+    .badge-danger { background: #f8d7da; color: #721c24; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ============================================================================
+# IMPORTS (after st.set_page_config)
+# ============================================================================
+
 from src import SkillSyncEngine
-from src.preprocessing import csv_parser
+from src.preprocessing.csv_parser import (
+    StackOverflowCSVParser, 
+    detect_csv_format, 
+    parse_csv_auto
+)
+from src.evaluation.metrics import (
+    TeamEvaluator, 
+    TeamQualityMetrics,
+    format_score_with_icon,
+    get_overall_status,
+    LatencyTracker
+)
 from src.utils import format_experience, format_skills_list, safe_float
 
 
-# --- CACHED RESOURCES ---
+# ============================================================================
+# CACHED RESOURCES
+# ============================================================================
+
 @st.cache_resource
 def load_engine():
     """Load and cache the SkillSync engine."""
@@ -34,399 +100,614 @@ def load_engine():
         return None
 
 
-# --- HELPER FUNCTIONS ---
-def display_metric_card(col, label: str, value: float, format_str: str = "{:.0%}"):
-    """Display a metric in a styled card."""
-    formatted = format_str.format(value) if isinstance(value, (int, float)) else str(value)
-    col.metric(label, formatted)
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def display_metric_card(label: str, value: Any, icon: str = "📊"):
+    """Display a styled metric card."""
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-value">{icon} {value}</div>
+        <div class="metric-label">{label}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
-def display_team_member(member: Dict[str, Any], show_details: bool = True):
-    """Display a team member card."""
+def display_score_badge(score: float, label: str = None):
+    """Display score with appropriate badge styling."""
+    if score >= 0.8:
+        badge_class = "badge-success"
+        icon = "✅"
+    elif score >= 0.5:
+        badge_class = "badge-warning"
+        icon = "⚠️"
+    else:
+        badge_class = "badge-danger"
+        icon = "❌"
+    
+    text = f"{icon} {score:.0%}"
+    if label:
+        text = f"{label}: {text}"
+    
+    st.markdown(f'<span class="status-badge {badge_class}">{text}</span>', unsafe_allow_html=True)
+
+
+def display_team_member_compact(member: Dict[str, Any]):
+    """Display team member in compact format."""
     name = member.get("name", "Unknown")
-    role = member.get("role", "Unknown Role")
-    match_score = member.get("match_score", 0)
+    role = member.get("role", "Unknown")
     exp = member.get("metadata", {}).get("work_experience_years", 0)
-    skills = member.get("technical", {}).get("skills", [])
+    skills = member.get("technical", {}).get("skills", [])[:4]
     belbin = member.get("personality", {}).get("Belbin_team_role", "Unknown")
+    match = member.get("match_score", 0)
     
-    with st.expander(f"**{name}** - {role} (Match: {match_score:.0%})"):
-        col1, col2 = st.columns(2)
-        
+    with st.container():
+        col1, col2 = st.columns([3, 1])
         with col1:
-            st.write(f"**Experience:** {format_experience(exp)}")
-            st.write(f"**Team Role:** {belbin}")
-        
+            st.markdown(f"**{name}** - {role}")
+            st.caption(f"📅 {format_experience(exp)} | 🎭 {belbin}")
+            st.caption(f"🛠️ {', '.join(skills)}")
         with col2:
-            industry = member.get("metadata", {}).get("industry", "General")
-            st.write(f"**Industry:** {industry}")
-            comm_style = member.get("collaboration", {}).get("communication_style", "Mixed")
-            st.write(f"**Communication:** {comm_style}")
-        
-        st.write(f"**Skills:** {format_skills_list(skills, 8)}")
-        
-        tools = member.get("technical", {}).get("tools", [])
-        if tools:
-            st.write(f"**Tools:** {format_skills_list(tools, 6)}")
+            display_score_badge(match, "Match")
 
 
-def display_evaluation_metrics(metrics: Dict[str, Any]):
-    """Display evaluation metrics in a grid."""
-    cols = st.columns(4)
+def display_quality_metrics_inline(metrics: TeamQualityMetrics):
+    """Display quality metrics inline with icons."""
+    icons = metrics.get_status_icons()
     
-    display_metric_card(cols[0], "Skill Coverage", metrics.get("skill_coverage", 0))
-    display_metric_card(cols[1], "Role Diversity", metrics.get("role_diversity", 0))
-    display_metric_card(cols[2], "Match Score", metrics.get("avg_match_score", 0))
-    display_metric_card(cols[3], "Overall", metrics.get("overall_score", 0))
-
-
-# --- MAIN APP ---
-def main():
-    # Load engine
-    engine = load_engine()
+    col1, col2, col3, col4 = st.columns(4)
     
-    if engine is None:
-        st.error("🚨 Failed to initialize SkillSync Engine. Please check your configuration.")
-        st.info("Make sure you have:")
-        st.code("""
-1. Created a .env file with:
-   OPENAI_API_KEY=your_api_key
-   OPENAI_BASE_URL=https://openrouter.ai/api/v1
-   OPENAI_MODEL=openai/gpt-4o-mini
+    with col1:
+        st.metric("Skills", f"{metrics.skill_coverage:.0%}", delta=None)
+        st.caption(icons["skill_coverage"])
+    with col2:
+        st.metric("Diversity", f"{metrics.role_diversity:.0%}", delta=None)
+        st.caption(icons["role_diversity"])
+    with col3:
+        st.metric("Experience", f"{metrics.experience_balance:.0%}", delta=None)
+        st.caption(icons["experience_balance"])
+    with col4:
+        st.metric("Overall", f"{metrics.overall_score:.0%}", delta=None)
+        st.caption(icons["overall"])
 
-2. Generated sample data:
-   python -m src.data_generator
-        """)
-        st.stop()
+
+# ============================================================================
+# DASHBOARD TAB
+# ============================================================================
+
+def render_dashboard(engine):
+    """Render the dashboard tab."""
+    st.header("📊 Dashboard")
+    st.markdown("Welcome to SkillSync AI - Your intelligent team formation assistant")
     
-    # --- SIDEBAR ---
-    with st.sidebar:
-        st.title("🧩 SkillSync")
-        st.caption("AI-Powered Team Formation")
-        st.markdown("---")
-        
-        st.metric("Candidates in Pool", engine.candidate_count)
-        
-        if st.button("🔄 Reload Database", use_container_width=True):
+    # Quick Stats Row
+    st.subheader("Quick Stats")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            label="👥 Candidates",
+            value=engine.candidate_count,
+            delta=None
+        )
+    
+    with col2:
+        # Calculate role distribution
+        roles = {}
+        for p in engine.raw_data:
+            role = p.get("role", "Unknown")
+            roles[role] = roles.get(role, 0) + 1
+        st.metric(
+            label="🎭 Unique Roles",
+            value=len(roles),
+            delta=None
+        )
+    
+    with col3:
+        # Calculate average experience
+        experiences = []
+        for p in engine.raw_data:
+            try:
+                exp = float(p.get("metadata", {}).get("work_experience_years", 0))
+                experiences.append(exp)
+            except:
+                pass
+        avg_exp = sum(experiences) / len(experiences) if experiences else 0
+        st.metric(
+            label="📈 Avg Experience",
+            value=f"{avg_exp:.1f} yrs",
+            delta=None
+        )
+    
+    with col4:
+        # Count industries
+        industries = set()
+        for p in engine.raw_data:
+            ind = p.get("metadata", {}).get("industry", "")
+            if ind and ind != "Other":
+                industries.add(ind)
+        st.metric(
+            label="🏢 Industries",
+            value=len(industries),
+            delta=None
+        )
+    
+    st.markdown("---")
+    
+    # Quick Actions
+    st.subheader("🚀 Quick Actions")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("🔨 Build a Team", use_container_width=True, type="primary"):
+            st.session_state["active_tab"] = 1
+            st.rerun()
+    
+    with col2:
+        if st.button("📤 Upload Candidates", use_container_width=True):
+            st.session_state["active_tab"] = 2
+            st.rerun()
+    
+    with col3:
+        if st.button("🔄 Refresh Data", use_container_width=True):
             st.cache_resource.clear()
             st.rerun()
-        
-        st.markdown("---")
-        st.markdown("### About")
+    
+    st.markdown("---")
+    
+    # Role Distribution Chart
+    st.subheader("👔 Role Distribution")
+    if roles:
+        role_df = pd.DataFrame([
+            {"Role": k, "Count": v} 
+            for k, v in sorted(roles.items(), key=lambda x: -x[1])[:10]
+        ])
+        st.bar_chart(role_df.set_index("Role"))
+    
+    # Industry Distribution
+    st.subheader("🏢 Industry Distribution")
+    industries_count = {}
+    for p in engine.raw_data:
+        ind = p.get("metadata", {}).get("industry", "Other")
+        industries_count[ind] = industries_count.get(ind, 0) + 1
+    
+    if industries_count:
+        ind_df = pd.DataFrame([
+            {"Industry": k, "Count": v}
+            for k, v in sorted(industries_count.items(), key=lambda x: -x[1])[:8]
+        ])
+        st.bar_chart(ind_df.set_index("Industry"))
+    
+    # How It Works Section
+    st.markdown("---")
+    st.subheader("🧠 How SkillSync Works")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
         st.markdown("""
-        SkillSync uses AI to form optimal teams by:
-        - Extracting requirements from descriptions
-        - Matching candidates using semantic search
-        - Balancing skills, experience & roles
-        - Validating against constraints
+        **1️⃣ Describe Project**
+        
+        Tell us what you're building in plain English.
         """)
-        
-        st.markdown("---")
-        st.caption("TU Wien - Generative AI Project")
-        st.caption("Group 45 | 2025W")
     
-    # --- MAIN TABS ---
-    tab1, tab2, tab3 = st.tabs([
-        "🚀 Team Builder", 
-        "👥 Talent Pool",
-        "📊 Evaluation"
-    ])
-    
-    # ==========================================
-    # TAB 1: TEAM BUILDER
-    # ==========================================
-    with tab1:
-        st.header("Project Team Assembly")
-        st.markdown("Describe your project needs, and AI will form optimized teams using multiple strategies.")
+    with col2:
+        st.markdown("""
+        **2️⃣ AI Extracts Needs**
         
-        # Input Section
+        Our AI identifies required skills, roles, and expertise.
+        """)
+    
+    with col3:
+        st.markdown("""
+        **3️⃣ Smart Matching**
+        
+        Candidates are ranked by semantic similarity to your needs.
+        """)
+    
+    with col4:
+        st.markdown("""
+        **4️⃣ Team Formation**
+        
+        Get 3 optimized team options with explanations.
+        """)
+
+
+# ============================================================================
+# TEAM BUILDER TAB
+# ============================================================================
+
+def render_team_builder(engine):
+    """Render the team builder tab."""
+    st.header("🔨 Team Builder")
+    st.markdown("Describe your project and we'll form optimized teams")
+    
+    # Input Section
+    with st.container():
         col1, col2 = st.columns([3, 1])
         
         with col1:
             project_desc = st.text_area(
-                "Project Requirements",
-                height=150,
-                placeholder="Example: We need a team to build a Fintech mobile app. Requires React Native, Python backend, AWS deployment, and strong security knowledge. Need mix of senior and mid-level developers."
+                "📝 Project Description",
+                height=120,
+                placeholder="Example: Build a Fintech mobile app with React Native, Python backend on AWS. Need payment integration and security expertise.",
+                help="Describe your project in plain language. Mention technologies, domain, and any specific requirements."
             )
         
         with col2:
             st.markdown("<br>", unsafe_allow_html=True)
             team_size = st.number_input(
-                "Team Size", 
-                min_value=2, 
-                max_value=10, 
+                "👥 Team Size",
+                min_value=2,
+                max_value=10,
                 value=4
             )
             
-            include_eval = st.checkbox("Include Evaluation", value=True)
-            generate_btn = st.button("✨ Generate Teams", type="primary", use_container_width=True)
+            min_availability = st.selectbox(
+                "⏰ Min Availability",
+                options=[None, 10, 20, 30, 40],
+                format_func=lambda x: "Any" if x is None else f"{x}+ hrs/week"
+            )
+            
+            generate_btn = st.button(
+                "✨ Generate Teams",
+                type="primary",
+                use_container_width=True
+            )
+    
+    # Process and Display Results
+    if generate_btn and project_desc:
+        with st.spinner("🤖 AI is analyzing requirements and forming teams..."):
+            start_time = time.time()
+            
+            results = engine.form_teams(
+                project_desc,
+                team_size,
+                include_evaluation=True
+            )
+            
+            total_time = (time.time() - start_time) * 1000
+            
+            if isinstance(results, tuple) and len(results) == 2:
+                strategies, requirements = results
+                
+                if isinstance(strategies, dict) and "error" in strategies:
+                    st.error(strategies["error"])
+                else:
+                    st.session_state['team_results'] = strategies
+                    st.session_state['requirements'] = requirements
+                    st.session_state['generation_time'] = total_time
+    
+    # Display Results (if available)
+    if 'team_results' in st.session_state:
+        strategies = st.session_state['team_results']
+        requirements = st.session_state['requirements']
+        gen_time = st.session_state.get('generation_time', 0)
         
-        # Generate Teams
-        if generate_btn and project_desc:
-            with st.spinner("🤖 AI is analyzing requirements and forming teams..."):
-                results = engine.form_teams(
-                    project_desc, 
-                    team_size,
-                    include_evaluation=include_eval
+        # Requirements Summary (collapsible)
+        with st.expander("🧠 Extracted Requirements", expanded=False):
+            req_cols = st.columns(4)
+            req_cols[0].write(f"**Domain:** {requirements.domain}")
+            req_cols[1].write(f"**Seniority:** {requirements.seniority_level}")
+            req_cols[2].write(f"**Skills:** {len(requirements.technical_keywords)}")
+            req_cols[3].write(f"**Roles:** {len(requirements.target_roles)}")
+            
+            st.info(f"**Summary:** {requirements.summary}")
+            
+            if requirements.technical_keywords:
+                st.write(f"**Technologies:** {', '.join(requirements.technical_keywords[:12])}")
+            if requirements.target_roles:
+                st.write(f"**Target Roles:** {', '.join(requirements.target_roles)}")
+        
+        st.success(f"✅ Generated 3 team options in {gen_time:.0f}ms")
+        st.markdown("---")
+        
+        # TEAMS FIRST - Display all teams in columns
+        st.subheader("👥 Your Team Options")
+        
+        team_cols = st.columns(3)
+        strategy_icons = ["🏆", "⚖️", "🎨"]
+        strategy_names = list(strategies.keys())
+        
+        for idx, (name, result) in enumerate(strategies.items()):
+            with team_cols[idx]:
+                st.markdown(f"### {strategy_icons[idx]} {result.strategy_name}")
+                
+                # Quick Quality Score
+                metrics = result.metadata.get("evaluation", {})
+                overall = metrics.get("overall_score", 0)
+                icon, label, _ = get_overall_status(
+                    TeamQualityMetrics(
+                        skill_coverage=metrics.get("skill_coverage", 0),
+                        role_diversity=metrics.get("role_diversity", 0),
+                        experience_balance=metrics.get("experience_balance", 0),
+                        avg_match_score=metrics.get("avg_match_score", 0),
+                        availability_fit=1.0
+                    )
                 )
                 
-                # Check for error
-                if isinstance(results, tuple) and len(results) == 2:
-                    strategies, requirements = results
-                    
-                    if isinstance(strategies, dict) and "error" in strategies:
-                        st.error(strategies["error"])
-                    else:
-                        # Save to session state
-                        st.session_state['team_results'] = strategies
-                        st.session_state['requirements'] = requirements
-                        st.session_state['project_desc'] = project_desc
-                else:
-                    st.error("Unexpected result format")
-        
-        # Display Results
-        if 'team_results' in st.session_state:
-            strategies = st.session_state['team_results']
-            requirements = st.session_state['requirements']
-            
-            # Show extracted requirements
-            with st.expander("🧠 AI Understanding (Extracted Requirements)", expanded=True):
-                req_cols = st.columns(4)
-                req_cols[0].write(f"**Domain:** {requirements.domain}")
-                req_cols[1].write(f"**Seniority:** {requirements.seniority_level}")
-                req_cols[2].write(f"**Roles:** {', '.join(requirements.target_roles[:3]) if requirements.target_roles else 'General'}")
-                req_cols[3].write(f"**Skills:** {len(requirements.technical_keywords)} identified")
+                st.markdown(f"**{icon} {label}** - {overall:.0%} overall")
                 
-                st.info(f"**Summary:** {requirements.summary}")
+                # Compact Quality Metrics
+                col1, col2 = st.columns(2)
+                col1.caption(f"Skills: {metrics.get('skill_coverage', 0):.0%}")
+                col2.caption(f"Diversity: {metrics.get('role_diversity', 0):.0%}")
                 
-                if requirements.technical_keywords:
-                    st.write(f"**Technical Keywords:** {', '.join(requirements.technical_keywords[:10])}")
-            
-            st.success("✅ Analysis Complete! Here are your team options:")
-            st.markdown("---")
-            
-            # Display teams in columns
-            team_cols = st.columns(3)
-            icons = ["🏆", "⚖️", "🎨"]
-            
-            for idx, (name, result) in enumerate(strategies.items()):
-                with team_cols[idx]:
-                    st.subheader(f"{icons[idx]} {result.strategy_name}")
-                    
-                    # AI Analysis
-                    with st.container(border=True):
-                        st.markdown("### 🤖 AI Analysis")
-                        st.write(result.llm_analysis or "Analysis generating...")
-                    
-                    # Validation Status
-                    validation = result.metadata.get("validation", {})
-                    if validation.get("is_valid", True):
-                        st.success(f"✓ Constraints satisfied ({validation.get('coverage_score', 1):.0%} skill coverage)")
-                    else:
-                        st.warning("⚠️ Some constraints not fully met")
-                        for warning in validation.get("warnings", [])[:2]:
-                            st.caption(f"  • {warning}")
-                    
-                    # Evaluation Metrics
-                    if include_eval and "evaluation" in result.metadata:
-                        with st.expander("📊 Quality Metrics"):
-                            metrics = result.metadata["evaluation"]
-                            st.write(f"**Overall Score:** {metrics.get('overall_score', 0):.0%}")
-                            st.write(f"**Skill Coverage:** {metrics.get('skill_coverage', 0):.0%}")
-                            st.write(f"**Diversity:** {metrics.get('role_diversity', 0):.0%}")
-                    
-                    # Team Members
-                    st.markdown("### Team Members")
-                    for member in result.members:
-                        display_team_member(member)
-    
-    # ==========================================
-    # TAB 2: TALENT POOL
-    # ==========================================
-    with tab2:
-        st.header("Talent Pool Management")
-        
-        # Upload Section
-        upload_col1, upload_col2 = st.columns(2)
-        
-        with upload_col1:
-            with st.expander("📤 Upload CSV", expanded=True):
-                st.markdown("Upload a CSV with columns: `Name`, `Role`, `Experience`, `Skills`")
+                st.markdown("---")
                 
-                uploaded_csv = st.file_uploader("Choose CSV file", type=["csv"], key="csv_upload")
-                
-                if uploaded_csv is not None:
-                    # Preview
-                    try:
-                        preview_df = pd.read_csv(uploaded_csv)
-                        st.write(f"Preview ({len(preview_df)} rows):")
-                        st.dataframe(preview_df.head(5), use_container_width=True)
+                # Team Members
+                for member in result.members:
+                    with st.container():
+                        name_str = member.get("name", "Unknown")
+                        role_str = member.get("role", "Unknown")
+                        exp = member.get("metadata", {}).get("work_experience_years", 0)
+                        match = member.get("match_score", 0)
                         
-                        # Reset file position for actual upload
-                        uploaded_csv.seek(0)
+                        st.markdown(f"**{name_str}**")
+                        st.caption(f"{role_str} | {format_experience(exp)} | Match: {match:.0%}")
                         
-                        if st.button("➕ Add to Database", key="add_csv"):
-                            try:
-                                count = engine.add_candidates_from_csv(uploaded_csv)
-                                st.success(f"✅ Added {count} candidates!")
-                                st.cache_resource.clear()
-                                time.sleep(1)
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Error: {e}")
-                    except Exception as e:
-                        st.error(f"Could not read CSV: {e}")
-        
-        with upload_col2:
-            with st.expander("📄 Upload Resume (PDF)", expanded=True):
-                st.markdown("Upload a PDF resume to extract candidate profile")
-                
-                uploaded_pdf = st.file_uploader("Choose PDF file", type=["pdf"], key="pdf_upload")
-                
-                if uploaded_pdf is not None:
-                    if st.button("🔍 Parse Resume", key="parse_pdf"):
-                        with st.spinner("Extracting profile from resume..."):
-                            try:
-                                profile = engine.add_candidates_from_pdf(uploaded_pdf.read())
-                                st.success(f"✅ Added: {profile.get('name', 'Unknown')}")
-                                st.json(profile)
-                                st.cache_resource.clear()
-                            except Exception as e:
-                                st.error(f"Error parsing PDF: {e}")
+                        skills = member.get("technical", {}).get("skills", [])[:3]
+                        st.caption(f"🛠️ {', '.join(skills)}")
+                        st.markdown("")
         
         st.markdown("---")
         
-        # Search and Display
-        st.subheader("Current Database")
+        # EXPLANATIONS BELOW
+        st.subheader("💡 AI Analysis")
         
-        search_query = st.text_input("🔍 Search candidates (by name, skill, or role)")
-        
-        # Build display dataframe
-        if engine.raw_data:
-            flat_data = []
-            for p in engine.raw_data:
-                flat_data.append({
-                    "Name": p.get("name", "N/A"),
-                    "Role": p.get("role", "N/A"),
-                    "Experience": format_experience(p.get("metadata", {}).get("work_experience_years", 0)),
-                    "Industry": p.get("metadata", {}).get("industry", "General"),
-                    "Skills": format_skills_list(p.get("technical", {}).get("skills", []), 4),
-                    "Belbin Role": p.get("personality", {}).get("Belbin_team_role", "Unknown")
-                })
-            
-            df = pd.DataFrame(flat_data)
-            
-            # Filter if search query
-            if search_query:
-                mask = df.apply(
-                    lambda x: x.astype(str).str.contains(search_query, case=False).any(), 
-                    axis=1
-                )
-                df = df[mask]
-            
-            st.dataframe(df, use_container_width=True, height=400)
-            st.caption(f"Showing {len(df)} of {len(engine.raw_data)} candidates")
-        else:
-            st.warning("No candidates in database. Upload CSV or PDF to add candidates.")
-            
-            # Sample CSV download
-            st.download_button(
-                "📥 Download Sample CSV Template",
-                data=csv_parser.generate_sample_csv(),
-                file_name="sample_candidates.csv",
-                mime="text/csv"
-            )
+        for idx, (name, result) in enumerate(strategies.items()):
+            with st.expander(f"{strategy_icons[idx]} {result.strategy_name} - Analysis", expanded=(idx == 0)):
+                st.markdown(result.llm_analysis)
+                
+                # Detailed metrics
+                if "evaluation" in result.metadata:
+                    st.markdown("**Quality Breakdown:**")
+                    m = result.metadata["evaluation"]
+                    metric_cols = st.columns(5)
+                    metric_cols[0].metric("Skills", f"{m.get('skill_coverage', 0):.0%}")
+                    metric_cols[1].metric("Diversity", f"{m.get('role_diversity', 0):.0%}")
+                    metric_cols[2].metric("Experience", f"{m.get('experience_balance', 0):.0%}")
+                    metric_cols[3].metric("Match", f"{m.get('avg_match_score', 0):.0%}")
+                    metric_cols[4].metric("Overall", f"{m.get('overall_score', 0):.0%}")
+                
+                # Validation warnings
+                validation = result.metadata.get("validation", {})
+                if validation.get("warnings"):
+                    st.warning("**Potential Gaps:**")
+                    for w in validation["warnings"][:3]:
+                        st.caption(f"⚠️ {w}")
+
+
+# ============================================================================
+# TALENT POOL TAB
+# ============================================================================
+
+def render_talent_pool(engine):
+    """Render the talent pool tab."""
+    st.header("👥 Talent Pool")
     
-    # ==========================================
-    # TAB 3: EVALUATION
-    # ==========================================
-    with tab3:
-        st.header("System Evaluation")
-        st.markdown("Evaluate team formation quality against random baseline.")
+    # Upload Section
+    upload_col1, upload_col2 = st.columns(2)
+    
+    with upload_col1:
+        st.subheader("📤 Upload CSV")
+        st.markdown("Supports both simple and StackOverflow formats (auto-detected)")
         
-        if 'team_results' not in st.session_state:
-            st.info("👆 Generate teams in the Team Builder tab first to see evaluation results.")
-        else:
-            strategies = st.session_state['team_results']
-            requirements = st.session_state['requirements']
+        uploaded_csv = st.file_uploader(
+            "Choose CSV file",
+            type=["csv"],
+            key="csv_upload",
+            help="Upload employee data. We auto-detect column format."
+        )
+        
+        if uploaded_csv is not None:
+            # Detect format and show preview
+            uploaded_csv.seek(0)
+            format_type = detect_csv_format(uploaded_csv)
+            uploaded_csv.seek(0)
             
-            st.subheader("Team Quality Comparison")
+            st.info(f"📋 Detected format: **{format_type.upper()}**")
             
-            # Create comparison table
-            comparison_data = []
-            for name, result in strategies.items():
-                metrics = result.metadata.get("evaluation", {})
-                comparison_data.append({
-                    "Strategy": result.strategy_name,
-                    "Overall Score": f"{metrics.get('overall_score', 0):.1%}",
-                    "Skill Coverage": f"{metrics.get('skill_coverage', 0):.1%}",
-                    "Role Diversity": f"{metrics.get('role_diversity', 0):.1%}",
-                    "Match Score": f"{metrics.get('avg_match_score', 0):.1%}",
-                    "Exp Balance": f"{metrics.get('experience_balance', 0):.1%}",
-                })
+            # Preview
+            preview_df = pd.read_csv(uploaded_csv)
+            st.write(f"Found **{len(preview_df)} rows** and **{len(preview_df.columns)} columns**")
             
-            if comparison_data:
-                st.dataframe(pd.DataFrame(comparison_data), use_container_width=True)
+            with st.expander("Preview Data"):
+                st.dataframe(preview_df.head(5))
             
-            # Benchmark against random
-            st.subheader("Benchmark Against Random")
+            uploaded_csv.seek(0)
             
-            if st.button("🎲 Run Random Baseline Comparison"):
-                with st.spinner("Running 50 random trials..."):
-                    # Get first team for comparison
-                    first_team = list(strategies.values())[0]
-                    
-                    eval_result = engine.get_team_evaluation(
-                        team=first_team.members,
-                        required_skills=requirements.technical_keywords,
-                        compare_to_random=True
-                    )
-                    
-                    if "benchmark" in eval_result:
-                        benchmark = eval_result["benchmark"]
-                        
-                        col1, col2, col3 = st.columns(3)
-                        
-                        col1.metric(
-                            "System Score",
-                            f"{benchmark['system']['overall_score']:.1%}"
-                        )
-                        col2.metric(
-                            "Random Baseline",
-                            f"{benchmark['random_baseline']['overall_score']:.1%}"
-                        )
-                        col3.metric(
-                            "Improvement",
-                            f"{benchmark['improvement_percentage']:.1f}%",
-                            delta=f"+{benchmark['improvement_percentage']:.1f}%"
+            # Options
+            col1, col2 = st.columns(2)
+            with col1:
+                use_llm_roles = st.checkbox(
+                    "Use AI to map 'Other' roles",
+                    value=True,
+                    help="Use LLM to map ambiguous role names to standard roles"
+                )
+            with col2:
+                min_avail_filter = st.selectbox(
+                    "Min availability filter",
+                    options=[None, 10, 20, 30],
+                    format_func=lambda x: "No filter" if x is None else f"{x}+ hrs/week"
+                )
+            
+            if st.button("➕ Add to Database", type="primary"):
+                with st.spinner("Processing CSV..."):
+                    try:
+                        uploaded_csv.seek(0)
+                        profiles = parse_csv_auto(
+                            uploaded_csv,
+                            llm_client=engine.llm_client,
+                            llm_model=engine.extractor.config.model if hasattr(engine.extractor, 'config') else "openai/gpt-4o-mini",
+                            use_llm_for_roles=use_llm_roles,
+                            min_availability_hours=min_avail_filter
                         )
                         
-                        st.success(f"✅ System outperforms random by {benchmark['improvement_percentage']:.1f}% (50 trials)")
-                    else:
-                        st.warning("Could not run benchmark - not enough candidates")
+                        # Add to engine
+                        engine.raw_data.extend(profiles)
+                        from src.utils import save_data
+                        save_data(engine.data_path, engine.raw_data)
+                        
+                        st.success(f"✅ Added {len(profiles)} candidates!")
+                        st.cache_resource.clear()
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+    
+    with upload_col2:
+        st.subheader("📄 Upload Resume (PDF)")
+        st.markdown("Extract candidate profile from PDF resume")
+        
+        uploaded_pdf = st.file_uploader(
+            "Choose PDF file",
+            type=["pdf"],
+            key="pdf_upload"
+        )
+        
+        if uploaded_pdf is not None:
+            if st.button("🔍 Parse Resume"):
+                with st.spinner("Extracting profile from resume..."):
+                    try:
+                        profile = engine.add_candidates_from_pdf(uploaded_pdf.read())
+                        st.success(f"✅ Added: {profile.get('name', 'Unknown')}")
+                        
+                        with st.expander("View Extracted Profile"):
+                            st.json(profile)
+                        
+                        st.cache_resource.clear()
+                    except Exception as e:
+                        st.error(f"Error parsing PDF: {e}")
+    
+    st.markdown("---")
+    
+    # Current Database
+    st.subheader("📊 Current Database")
+    
+    # Search and filters
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        search_query = st.text_input("🔍 Search", placeholder="Search by name, skill, or role...")
+    with col2:
+        role_filter = st.selectbox(
+            "Filter by Role",
+            options=["All"] + list(set(p.get("role", "") for p in engine.raw_data if p.get("role")))
+        )
+    with col3:
+        industry_filter = st.selectbox(
+            "Filter by Industry",
+            options=["All"] + list(set(p.get("metadata", {}).get("industry", "") for p in engine.raw_data if p.get("metadata", {}).get("industry")))
+        )
+    
+    # Build display dataframe with all relevant columns
+    if engine.raw_data:
+        flat_data = []
+        for p in engine.raw_data:
+            flat_data.append({
+                "ID": p.get("id", "N/A")[:8],
+                "Name": p.get("name", "N/A"),
+                "Role": p.get("role", "N/A"),
+                "Experience": format_experience(p.get("metadata", {}).get("work_experience_years", 0)),
+                "Industry": p.get("metadata", {}).get("industry", "N/A"),
+                "Skills": format_skills_list(p.get("technical", {}).get("skills", []), 4),
+                "Tools": format_skills_list(p.get("technical", {}).get("tools", []), 3),
+                "Belbin": p.get("personality", {}).get("Belbin_team_role", "N/A"),
+                "Availability": p.get("constraints", {}).get("weekly_availability_hours", "N/A"),
+                "Communication": p.get("collaboration", {}).get("communication_style", "N/A"),
+            })
+        
+        df = pd.DataFrame(flat_data)
+        
+        # Apply filters
+        if search_query:
+            mask = df.apply(
+                lambda x: x.astype(str).str.contains(search_query, case=False).any(),
+                axis=1
+            )
+            df = df[mask]
+        
+        if role_filter != "All":
+            df = df[df["Role"] == role_filter]
+        
+        if industry_filter != "All":
+            df = df[df["Industry"] == industry_filter]
+        
+        st.dataframe(df, use_container_width=True, height=400)
+        st.caption(f"Showing {len(df)} of {len(engine.raw_data)} candidates")
+    else:
+        st.warning("No candidates in database. Upload CSV or PDF to add candidates.")
+
+
+# ============================================================================
+# MAIN APP
+# ============================================================================
+
+def main():
+    # Load engine
+    engine = load_engine()
+    
+    if engine is None:
+        st.error("🚨 Failed to initialize SkillSync Engine")
+        st.info("""
+        **Setup Required:**
+        1. Create `.env` file with your API key
+        2. Run `python -m src.data_generator` to generate sample data
+        """)
+        st.code("""
+OPENAI_API_KEY=your-api-key
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+OPENAI_MODEL=openai/gpt-4o-mini
+        """)
+        st.stop()
+    
+    # Sidebar
+    with st.sidebar:
+        st.title("🧩 SkillSync AI")
+        st.caption("Intelligent Team Formation")
+        st.markdown("---")
+        
+        # Stats
+        st.metric("📊 Candidates", engine.candidate_count)
+        
+        # Quick actions
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.cache_resource.clear()
+            st.rerun()
+        
+        st.markdown("---")
+        
+        # About
+        with st.expander("ℹ️ About"):
+            st.markdown("""
+            **SkillSync AI** uses:
+            - 🤖 LLM for requirement extraction
+            - 🔍 Semantic search for matching
+            - 📊 Multiple team strategies
+            - ✅ Quality evaluation
             
-            # Latency metrics
-            st.subheader("Pipeline Performance")
-            latency_report = engine.latency_tracker.get_report()
-            
-            latency_df = pd.DataFrame([{
-                "Stage": "Requirement Extraction",
-                "Time (ms)": latency_report.extraction_ms
-            }, {
-                "Stage": "Candidate Retrieval",
-                "Time (ms)": latency_report.retrieval_ms
-            }, {
-                "Stage": "Team Formation",
-                "Time (ms)": latency_report.team_formation_ms
-            }, {
-                "Stage": "Explanation Generation",
-                "Time (ms)": latency_report.explanation_ms
-            }, {
-                "Stage": "Total",
-                "Time (ms)": latency_report.total_ms
-            }])
-            
-            st.dataframe(latency_df, use_container_width=True)
+            Built for TU Wien GenAI Course
+            """)
+        
+        st.markdown("---")
+        st.caption("Group 45 | 2025W")
+    
+    # Main tabs
+    tab1, tab2, tab3 = st.tabs([
+        "📊 Dashboard",
+        "🔨 Team Builder",
+        "👥 Talent Pool"
+    ])
+    
+    with tab1:
+        render_dashboard(engine)
+    
+    with tab2:
+        render_team_builder(engine)
+    
+    with tab3:
+        render_talent_pool(engine)
 
 
 if __name__ == "__main__":

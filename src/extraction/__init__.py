@@ -1,9 +1,18 @@
-"""
-Extraction Module
+"""Extraction module."""
+from .llm_extractor import (
+    ChainedLLMExtractor,
+    SimpleLLMExtractor,
+    ProjectRequirements,
+    TeamExplanation,
+    ExtractionConfig,
+    ALLOWED_ROLES
+)
 
-Handles LLM-based information extraction and structuring.
-"""
-
-from .llm_extractor import LLMExtractor, ProjectRequirements
-
-__all__ = ["LLMExtractor", "ProjectRequirements"]
+__all__ = [
+    "ChainedLLMExtractor",
+    "SimpleLLMExtractor", 
+    "ProjectRequirements",
+    "TeamExplanation",
+    "ExtractionConfig",
+    "ALLOWED_ROLES",
+]

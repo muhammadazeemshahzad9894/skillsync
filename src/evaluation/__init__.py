@@ -1,21 +1,26 @@
-"""
-Evaluation Module
-
-Provides metrics and benchmarking for team formation quality assessment.
-"""
-
+"""Evaluation module."""
 from .metrics import (
+    ExtractionEvaluator,
+    ExtractionMetrics,
     TeamEvaluator,
-    EvaluationMetrics,
+    TeamQualityMetrics,
     BenchmarkResult,
     LatencyTracker,
-    PipelineLatencyReport
+    LatencyReport,
+    format_score_with_icon,
+    get_overall_status,
+    EXTRACTION_TEST_SET
 )
 
 __all__ = [
+    "ExtractionEvaluator",
+    "ExtractionMetrics",
     "TeamEvaluator",
-    "EvaluationMetrics",
+    "TeamQualityMetrics",
     "BenchmarkResult",
     "LatencyTracker",
-    "PipelineLatencyReport"
+    "LatencyReport",
+    "format_score_with_icon",
+    "get_overall_status",
+    "EXTRACTION_TEST_SET",
 ]

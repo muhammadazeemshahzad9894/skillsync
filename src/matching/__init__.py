@@ -1,9 +1,4 @@
-"""
-Matching Module
-
-Handles candidate embedding generation, similarity search, and retrieval.
-"""
-
+"""Matching module."""
 from .embeddings import EmbeddingManager
 from .retrieval import CandidateRetriever
 

@@ -1,8 +1,10 @@
 """
-SkillSync Engine
+SkillSync Engine v2
 
-Main orchestration layer that coordinates all system components
-for end-to-end team formation.
+Enhanced orchestration layer with:
+- Chained LLM extraction
+- Availability filtering
+- Comprehensive evaluation
 """
 
 import os
@@ -13,19 +15,14 @@ from typing import Dict, List, Any, Optional, Tuple
 from openai import OpenAI
 
 from config.settings import settings
-from .preprocessing import normalizer, csv_parser, PDFParser
-from .extraction import LLMExtractor, ProjectRequirements
+from .preprocessing import normalizer
+from .preprocessing.csv_parser import parse_csv_auto, StackOverflowCSVParser
+from .extraction import ChainedLLMExtractor, ProjectRequirements, ExtractionConfig
 from .matching import EmbeddingManager, CandidateRetriever
-from .team_formation import (
-    team_formation_engine,
-    TeamFormationResult,
-    constraint_validator,
-    ValidationResult
-)
-from .evaluation import TeamEvaluator, LatencyTracker, EvaluationMetrics
+from .team_formation import team_formation_engine, TeamFormationResult, constraint_validator
+from .evaluation import TeamEvaluator, LatencyTracker, TeamQualityMetrics
 from .utils import load_data, save_data
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -37,57 +34,39 @@ class SkillSyncEngine:
     """
     Main engine for AI-powered team formation.
     
-    Orchestrates the complete pipeline:
-    1. Load and preprocess candidate data
-    2. Generate embeddings for semantic search
-    3. Extract structured requirements from natural language
-    4. Retrieve matching candidates
-    5. Form teams using multiple strategies
-    6. Validate against constraints
-    7. Generate explanations
-    8. Evaluate quality
-    
-    Example:
-        engine = SkillSyncEngine()
-        results, requirements = engine.form_teams(
-            "Build a fintech mobile app with React Native and Python backend",
-            team_size=4
-        )
+    Enhanced features:
+    - Chain-of-prompts extraction
+    - Availability filtering
+    - StackOverflow CSV support
+    - Comprehensive metrics
     """
     
     def __init__(self, data_path: str = None):
-        """
-        Initialize the SkillSync engine.
-        
-        Args:
-            data_path: Optional custom path to employee data
-        """
-        logger.info("⚙️ Initializing SkillSync Engine...")
+        """Initialize the SkillSync engine."""
+        logger.info("⚙️ Initializing SkillSync Engine v2...")
         
         self.data_path = data_path or settings.paths.employees_path
         self.latency_tracker = LatencyTracker()
         
-        # Initialize components
         self._init_data()
         self._init_embeddings()
         self._init_llm()
         
-        logger.info("✅ SkillSync Engine ready.")
+        logger.info("✅ SkillSync Engine v2 ready.")
     
     def _init_data(self) -> None:
-        """Load and preprocess candidate data."""
+        """Load candidate data."""
         logger.info(f"📂 Loading data from {self.data_path}...")
-        
         self.raw_data = load_data(self.data_path)
         
         if not self.raw_data:
-            logger.warning("No employee data found. Use add_candidates() to populate.")
+            logger.warning("No employee data found.")
         else:
             logger.info(f"📊 Loaded {len(self.raw_data)} candidate profiles")
     
     def _init_embeddings(self) -> None:
-        """Initialize embedding manager and retriever."""
-        logger.info(f"🧠 Loading embedding model ({settings.embedding.model_name})...")
+        """Initialize embedding manager."""
+        logger.info(f"🧠 Loading embedding model...")
         
         self.embedding_manager = EmbeddingManager(
             model_name=settings.embedding.model_name,
@@ -99,12 +78,11 @@ class SkillSyncEngine:
             embedding_manager=self.embedding_manager
         )
         
-        # Pre-compute embeddings if we have data
         if self.raw_data:
             _ = self.retriever.embeddings
     
     def _init_llm(self) -> None:
-        """Initialize LLM client and extractor."""
+        """Initialize LLM client and extractors."""
         logger.info("🔌 Connecting to LLM API...")
         
         self.llm_client = OpenAI(
@@ -112,21 +90,22 @@ class SkillSyncEngine:
             base_url=settings.llm.base_url
         )
         
-        self.extractor = LLMExtractor(
+        # Use chained extractor for better results
+        self.extractor = ChainedLLMExtractor(
             client=self.llm_client,
-            model=settings.llm.model,
+            config=ExtractionConfig(
+                model=settings.llm.model,
+                temperature_extract=0.0,
+                temperature_validate=0.0,
+                temperature_enhance=0.1
+            ),
             extra_headers=settings.llm_headers
         )
         
-        self.pdf_parser = PDFParser(
-            llm_client=self.llm_client,
-            llm_model=settings.llm.model
-        )
-        
-        self.evaluator = TeamEvaluator(retriever=self.retriever)
+        self.evaluator = TeamEvaluator()
     
     def reload_data(self) -> None:
-        """Reload data from disk and refresh embeddings."""
+        """Reload data from disk."""
         logger.info("🔄 Reloading data...")
         self._init_data()
         self.retriever = CandidateRetriever(
@@ -137,19 +116,23 @@ class SkillSyncEngine:
         _ = self.retriever.embeddings
         logger.info("✅ Data reloaded.")
     
-    def add_candidates_from_csv(self, file_or_path: Any) -> int:
+    def add_candidates_from_csv(
+        self,
+        file_or_path: Any,
+        min_availability_hours: int = None
+    ) -> int:
         """
         Add candidates from CSV file.
         
-        Args:
-            file_or_path: CSV file path or file-like object
-            
-        Returns:
-            Number of candidates added
+        Supports both simple and StackOverflow formats.
         """
-        new_profiles = csv_parser.parse_csv(file_or_path)
+        new_profiles = parse_csv_auto(
+            file_or_path,
+            llm_client=self.llm_client,
+            llm_model=settings.llm.model,
+            min_availability_hours=min_availability_hours
+        )
         
-        # Add to data and save
         self.raw_data.extend(new_profiles)
         save_data(self.data_path, self.raw_data)
         
@@ -163,23 +146,21 @@ class SkillSyncEngine:
         return len(new_profiles)
     
     def add_candidates_from_pdf(self, pdf_bytes: bytes) -> Dict[str, Any]:
-        """
-        Add candidate from PDF resume.
+        """Add candidate from PDF resume."""
+        # Import PDF parser here to avoid import issues if PyMuPDF not installed
+        from .preprocessing.pdf_parser import PDFParser
         
-        Args:
-            pdf_bytes: PDF file content
-            
-        Returns:
-            Parsed profile dictionary
-        """
-        profile = self.pdf_parser.parse_resume(
+        pdf_parser = PDFParser(
+            llm_client=self.llm_client,
+            llm_model=settings.llm.model
+        )
+        
+        profile = pdf_parser.parse_resume(
             pdf_bytes,
             extra_headers=settings.llm_headers
         )
         
         profile_dict = profile.to_dict()
-        
-        # Add to data and save
         self.raw_data.append(profile_dict)
         save_data(self.data_path, self.raw_data)
         
@@ -196,33 +177,33 @@ class SkillSyncEngine:
         self,
         project_description: str,
         team_size: int = None,
-        include_evaluation: bool = True
+        include_evaluation: bool = True,
+        min_availability_hours: int = None
     ) -> Tuple[Dict[str, TeamFormationResult], ProjectRequirements]:
         """
         Form teams based on project description.
         
-        Args:
-            project_description: Natural language project description
-            team_size: Desired team size (default from settings)
-            include_evaluation: Whether to compute evaluation metrics
-            
         Returns:
             Tuple of (strategies dict, requirements)
         """
         team_size = team_size or settings.team.default_team_size
         self.latency_tracker.reset()
         
-        # 1. Extract Requirements
+        # 1. Extract Requirements (chained)
         with self.latency_tracker.track("extraction"):
-            logger.info("🔍 Extracting requirements...")
-            requirements = self.extractor.extract_project_requirements(project_description)
+            logger.info("🔍 Extracting requirements (chain approach)...")
+            requirements = self.extractor.extract_requirements(project_description)
+        
+        # Use availability from requirements if specified
+        if requirements.min_availability_hours and not min_availability_hours:
+            min_availability_hours = requirements.min_availability_hours
         
         # 2. Retrieve Candidates
         with self.latency_tracker.track("retrieval"):
             logger.info("🎯 Searching candidates...")
             pool_size = team_size * settings.team.candidate_pool_multiplier
             
-            # Use filtered search if we have constraints
+            # Filter by availability if specified
             candidate_pool = self.retriever.search_with_filters(
                 query=requirements.to_search_query(),
                 top_k=pool_size,
@@ -230,10 +211,17 @@ class SkillSyncEngine:
                 max_experience=requirements.max_experience,
                 required_skills=requirements.technical_keywords[:5] if requirements.technical_keywords else None
             )
+            
+            # Additional availability filtering
+            if min_availability_hours:
+                candidate_pool = [
+                    c for c in candidate_pool
+                    if c.get("constraints", {}).get("max_hours", 40) >= min_availability_hours
+                ]
         
         if len(candidate_pool) < team_size:
             logger.error(f"Not enough candidates: {len(candidate_pool)} < {team_size}")
-            return {"error": f"Not enough candidates found. Found {len(candidate_pool)}, need {team_size}."}, requirements
+            return {"error": f"Not enough candidates. Found {len(candidate_pool)}, need {team_size}."}, requirements
         
         # 3. Form Teams
         with self.latency_tracker.track("team_formation"):
@@ -245,7 +233,7 @@ class SkillSyncEngine:
                 strategy_keys=["expert", "balanced", "diverse"]
             )
         
-        # 4. Validate and Enrich Results
+        # 4. Validate and Evaluate
         for name, result in strategies.items():
             # Validate
             validation = constraint_validator.validate(
@@ -260,11 +248,12 @@ class SkillSyncEngine:
                 "coverage_score": validation.coverage_score
             }
             
-            # Evaluate if requested
+            # Evaluate
             if include_evaluation:
                 metrics = self.evaluator.evaluate_team(
                     result.members,
-                    required_skills=requirements.technical_keywords
+                    required_skills=requirements.technical_keywords,
+                    min_availability_hours=min_availability_hours
                 )
                 result.metadata["evaluation"] = metrics.to_dict()
         
@@ -276,11 +265,11 @@ class SkillSyncEngine:
                     team_members=result.members,
                     project_summary=requirements.summary,
                     strategy_name=result.strategy_name,
-                    strategy_rationale=result.rationale
+                    strategy_rationale=result.rationale,
+                    required_skills=requirements.technical_keywords
                 )
-                result.llm_analysis = explanation
+                result.llm_analysis = explanation.to_markdown()
         
-        # Log latency
         latency_report = self.latency_tracker.get_report()
         logger.info(f"⏱️ Total latency: {latency_report.total_ms:.0f}ms")
         
@@ -292,24 +281,12 @@ class SkillSyncEngine:
         required_skills: List[str] = None,
         compare_to_random: bool = True
     ) -> Dict[str, Any]:
-        """
-        Get detailed evaluation for a team.
-        
-        Args:
-            team: Team member profiles
-            required_skills: Skills to check coverage for
-            compare_to_random: Whether to benchmark against random
-            
-        Returns:
-            Evaluation results dictionary
-        """
+        """Get detailed evaluation for a team."""
         result = {}
         
-        # Basic metrics
         metrics = self.evaluator.evaluate_team(team, required_skills)
         result["metrics"] = metrics.to_dict()
         
-        # Validation
         validation = constraint_validator.validate(
             team_members=team,
             required_skills=required_skills
@@ -319,7 +296,6 @@ class SkillSyncEngine:
             "warnings": validation.warnings
         }
         
-        # Benchmark
         if compare_to_random and len(self.raw_data) > len(team):
             benchmark = self.evaluator.benchmark_against_random(
                 system_team=team,
@@ -332,25 +308,7 @@ class SkillSyncEngine:
     
     @property
     def candidate_count(self) -> int:
-        """Get number of candidates in pool."""
         return len(self.raw_data)
     
-    def get_candidate_by_id(self, candidate_id: str) -> Optional[Dict[str, Any]]:
-        """Get candidate profile by ID."""
-        for candidate in self.raw_data:
-            if candidate.get("id") == candidate_id:
-                return candidate
-        return None
-    
     def search_candidates(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
-        """
-        Search for candidates matching a query.
-        
-        Args:
-            query: Search query
-            top_k: Maximum results
-            
-        Returns:
-            List of matching candidates
-        """
         return self.retriever.search(query, top_k=top_k)

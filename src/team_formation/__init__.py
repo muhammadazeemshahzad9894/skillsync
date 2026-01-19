@@ -1,9 +1,4 @@
-"""
-Team Formation Module
-
-Handles team assembly using multiple strategies with constraint validation.
-"""
-
+"""Team formation module."""
 from .strategies import (
     TeamFormationEngine,
     TeamFormationResult,

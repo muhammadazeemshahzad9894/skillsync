@@ -1,46 +1,56 @@
 """
 SkillSync Configuration Management
 
-Centralized configuration with environment variable loading and validation.
+Centralized configuration with support for:
+- Local development (.env file)
+- Streamlit Cloud (st.secrets)
 """
 
 import os
 from dataclasses import dataclass
 from typing import Optional
-from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# Try Streamlit secrets first (for cloud deployment)
+try:
+    import streamlit as st
+    if hasattr(st, 'secrets') and len(st.secrets) > 0:
+        os.environ['OPENAI_API_KEY'] = st.secrets.get('OPENAI_API_KEY', os.environ.get('OPENAI_API_KEY', ''))
+        os.environ['OPENAI_BASE_URL'] = st.secrets.get('OPENAI_BASE_URL', os.environ.get('OPENAI_BASE_URL', 'https://openrouter.ai/api/v1'))
+        os.environ['OPENAI_MODEL'] = st.secrets.get('OPENAI_MODEL', os.environ.get('OPENAI_MODEL', 'openai/gpt-4o-mini'))
+except:
+    pass
+
+# Load .env for local development
+from dotenv import load_dotenv
 load_dotenv()
 
 
 @dataclass
 class LLMConfig:
-    """Configuration for LLM (OpenRouter/OpenAI) connection."""
+    """LLM configuration."""
     api_key: str
     base_url: str
     model: str
     temperature: float = 0.1
-    max_tokens: int = 1000
-    
-    # OpenRouter specific headers
+    max_tokens: int = 1500
     http_referer: str = "https://skillsync.app"
     app_title: str = "SkillSync"
 
 
-@dataclass  
+@dataclass
 class EmbeddingConfig:
-    """Configuration for sentence transformer embeddings."""
+    """Embedding model configuration."""
     model_name: str = "all-MiniLM-L6-v2"
     show_progress: bool = True
 
 
 @dataclass
-class TeamFormationConfig:
-    """Configuration for team formation parameters."""
+class TeamConfig:
+    """Team formation configuration."""
     min_team_size: int = 2
     max_team_size: int = 10
     default_team_size: int = 4
-    candidate_pool_multiplier: int = 5  # Pool = team_size * multiplier
+    candidate_pool_multiplier: int = 5
 
 
 @dataclass
@@ -55,30 +65,24 @@ class PathConfig:
 
 
 class Settings:
-    """
-    Main settings class that aggregates all configurations.
-    
-    Usage:
-        from config.settings import settings
-        print(settings.llm.model)
-    """
+    """Main settings class."""
     
     def __init__(self):
         self._validate_environment()
         
         self.llm = LLMConfig(
             api_key=os.getenv("OPENAI_API_KEY", ""),
-            base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            base_url=os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1"),
+            model=os.getenv("OPENAI_MODEL", "openai/gpt-4o-mini"),
             temperature=float(os.getenv("LLM_TEMPERATURE", "0.1")),
-            max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1000")),
+            max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1500")),
         )
         
         self.embedding = EmbeddingConfig(
             model_name=os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
         )
         
-        self.team = TeamFormationConfig(
+        self.team = TeamConfig(
             min_team_size=int(os.getenv("MIN_TEAM_SIZE", "2")),
             max_team_size=int(os.getenv("MAX_TEAM_SIZE", "10")),
             default_team_size=int(os.getenv("DEFAULT_TEAM_SIZE", "4")),
@@ -90,24 +94,20 @@ class Settings:
         )
     
     def _validate_environment(self) -> None:
-        """Validate required environment variables exist."""
-        required_vars = ["OPENAI_API_KEY"]
-        missing = [var for var in required_vars if not os.getenv(var)]
-        
-        if missing:
+        """Validate required environment variables."""
+        if not os.getenv("OPENAI_API_KEY"):
             raise EnvironmentError(
-                f"Missing required environment variables: {', '.join(missing)}. "
-                "Please check your .env file."
+                "Missing OPENAI_API_KEY. Please set it in .env file or Streamlit secrets."
             )
     
     @property
     def llm_headers(self) -> dict:
-        """Return headers for OpenRouter API calls."""
+        """Headers for OpenRouter API calls."""
         return {
             "HTTP-Referer": self.llm.http_referer,
             "X-Title": self.llm.app_title,
         }
 
 
-# Singleton instance
+# Singleton
 settings = Settings()
