@@ -15,7 +15,13 @@ from .metrics import (
     ExtractionMetrics,
     EXTRACTION_TEST_SET,
     format_score_with_icon,
-    get_overall_status
+    get_overall_status,
+    ChainedLLMExtractor,
+    LLMExtractor,
+    ProjectRequirements,
+    ExtractionConfig,
+    ALLOWED_ROLES,
+    DOMAINS
 )
 
 __all__ = [
@@ -27,6 +33,13 @@ __all__ = [
     'EXTRACTION_TEST_SET',
     'format_score_with_icon',
     'get_overall_status'
+    'ChainedLLMExtractor',
+    'LLMExtractor',
+    'ProjectRequirements',
+    'ExtractionConfig',
+    'ALLOWED_ROLES',
+    'DOMAINS'
 ]
 """
 }
+
