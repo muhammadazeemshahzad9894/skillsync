@@ -64,67 +64,105 @@ ALLOWED_ROLES = [
 # PROMPTS - STAGE 1: EXTRACT
 # ============================================================================
 
-EXTRACT_SYSTEM_PROMPT = """You are an information extraction assistant for a team formation system.
+EXTRACT_SYSTEM_PROMPT = """You are a technical requirements extraction assistant for a team formation system.
 
-HARD CONSTRAINTS:
-- Extract ONLY what is explicitly mentioned in the project description
-- Return VALID JSON ONLY (no markdown, no extra text)
-- Do NOT invent, assume, or infer beyond the text
-- If uncertain, omit the item
+YOUR JOB:
+1. Extract ALL technologies, frameworks, languages, and tools explicitly mentioned
+2. Identify the professional roles needed based on the technologies
+3. Classify the industry domain
+4. Return structured JSON
+
+BE THOROUGH but ACCURATE:
+- Include every technology mentioned by name
+- Infer roles based on technology patterns (React → front-end developer)
+- Be specific about domains (E-commerce, Fintech, Healthcare, not just "Technology")
+- Return ONLY valid JSON (no markdown, no extra text)
 
 CATEGORY RULES:
-- "skills": programming languages, frameworks, libraries, databases, cloud platforms, protocols
-- "tools": developer tools ONLY (IDEs, CLIs, build/test/deploy tools)
-- "roles": job roles needed for the project
-- Cloud platforms (AWS, GCP, Azure) are ALWAYS "skills", NEVER "tools"
+- "technical_keywords": programming languages, frameworks, libraries, databases, cloud platforms
+- "tools": developer tools ONLY (Git, Docker, Figma, Jira, etc.)
+- "target_roles": job roles inferred from the tech stack
+- Cloud platforms (AWS, GCP, Azure) are ALWAYS "technical_keywords", NEVER "tools"
 """
 
-EXTRACT_USER_PROMPT = """Extract technical requirements from this project description.
+EXTRACT_USER_PROMPT = """Extract ALL technical requirements from this project description.
 
-Return this EXACT JSON schema:
-{
-  "technical_keywords": ["list of skills/technologies mentioned"],
-  "tools": ["list of developer tools mentioned"],
-  "target_roles": ["list of job roles needed"],
-  "domain": "industry domain (Fintech, Healthcare, E-commerce, etc.)",
-  "seniority_level": "Junior | Mid | Senior | Mixed",
-  "min_experience": null or number,
-  "max_experience": null or number,
-  "min_availability_hours": null or number,
-  "summary": "1-2 sentence professional summary of requirements"
-}
+STEP-BY-STEP EXTRACTION:
 
-ROLE INFERENCE RULES (apply only when explicitly mentioned):
-- Frontend frameworks (React, Vue, Angular) → "Developer, front-end"
-- Backend services/APIs → "Developer, back-end"
-- "full-stack" mentioned → "Developer, full-stack"
-- Mobile apps (React Native, iOS, Android) → "Developer, mobile"
-- ML/AI/NLP → "Data scientist or machine learning specialist"
-- Docker/Kubernetes/CI-CD → "DevOps specialist"
-- Cloud platforms → "Cloud infrastructure engineer"
-- Data pipelines/SQL → "Data engineer"
+1. IDENTIFY TECHNOLOGIES (for "technical_keywords"):
+   - Programming languages: Python, JavaScript, Java, C++, etc.
+   - Frameworks: React, Django, Spring, Flask, FastAPI, etc.
+   - Databases: PostgreSQL, MongoDB, MySQL, SQL, NoSQL, etc.
+   - Cloud: AWS, Azure, GCP, cloud services
+   - ML/AI: TensorFlow, PyTorch, Machine Learning, AI
+   - Other: Any tech mentioned (GraphQL, REST, Docker, etc.)
+   → Extract EVERY technology mentioned by name
+
+2. IDENTIFY TOOLS (for "tools"):
+   - Development: Git, GitHub, VS Code, IntelliJ
+   - Design: Figma, Sketch, Adobe XD
+   - Project: Jira, Trello, Slack
+   - DevOps: Docker, Kubernetes, Jenkins, CI/CD tools
+   
+3. INFER ROLES (for "target_roles") - Use EXACT names from this list:
+   - "Developer, front-end" ← IF React, Vue, Angular, frontend mentioned
+   - "Developer, back-end" ← IF Django, Flask, FastAPI, Node.js, Spring, API, backend mentioned
+   - "Developer, full-stack" ← IF both frontend AND backend tech mentioned
+   - "Developer, mobile" ← IF React Native, Flutter, iOS, Android, mobile mentioned
+   - "Data scientist or machine learning specialist" ← IF ML, TensorFlow, PyTorch, AI mentioned
+   - "DevOps specialist" ← IF Docker, Kubernetes, CI/CD mentioned
+   - "Cloud infrastructure engineer" ← IF AWS, Azure, GCP deployment mentioned
+   - "Data engineer" ← IF data pipelines, ETL, SQL, analytics mentioned
+   → Include ALL relevant roles based on tech stack
+
+4. CLASSIFY DOMAIN (for "domain"):
+   - "Fintech" ← payment, banking, trading, financial
+   - "Healthcare" ← medical, health, patient, diagnostic
+   - "E-commerce" ← shopping, store, marketplace, retail, e-commerce
+   - "Education" ← learning, teaching, courses, educational
+   - "Manufacturing" ← factory, production, industrial
+   - "Gaming" ← game, gaming, entertainment
+   - Use best match, avoid generic "Technology" or "General"
+
+5. SET SENIORITY (for "seniority_level"):
+   - "Junior" if "junior" or "entry-level" mentioned
+   - "Senior" if "senior" or "experienced" or "5+ years" mentioned
+   - "Mixed" if not specified (default)
+
+RETURN THIS EXACT JSON SCHEMA:
+{{
+  "technical_keywords": ["list every technology mentioned"],
+  "tools": ["list developer/design tools"],
+  "target_roles": ["roles from the approved list above"],
+  "domain": "specific industry domain",
+  "seniority_level": "Junior|Mid|Senior|Mixed",
+  "min_experience": null,
+  "max_experience": null,
+  "min_availability_hours": null,
+  "summary": "1-2 sentence professional summary"
+}}
 
 PROJECT DESCRIPTION:
 {description}
 
-Return JSON only:"""
+Return ONLY the JSON object (no markdown, no backticks, no extra text):"""
 
 
 # ============================================================================
 # PROMPTS - STAGE 2: VALIDATE
 # ============================================================================
 
-VALIDATE_SYSTEM_PROMPT = """You are a validation assistant that checks extracted requirements for accuracy.
+VALIDATE_SYSTEM_PROMPT = """You are a validation assistant that checks and improves extracted requirements.
 
 Your job:
-1. Remove any hallucinated items not in the original text
-2. Ensure roles match the ALLOWED ROLES list exactly
-3. Check that skills are classified correctly (not mixed with tools)
-4. Verify the summary accurately reflects the description
+1. Verify all items are reasonable given the project description
+2. Ensure roles match the ALLOWED ROLES list (fix any mismatches)
+3. Keep all technologies that are mentioned or reasonably implied
+4. Fix obvious errors but don't remove items unnecessarily
 
-Be strict - remove anything questionable."""
+Be helpful, not overly strict - we want comprehensive extraction."""
 
-VALIDATE_USER_PROMPT = """Validate this extraction against the original project description.
+VALIDATE_USER_PROMPT = """Check and improve this extraction against the original project description.
 
 ORIGINAL DESCRIPTION:
 "{description}"
@@ -132,17 +170,20 @@ ORIGINAL DESCRIPTION:
 EXTRACTED DATA:
 {extracted_json}
 
-ALLOWED ROLES (use EXACT names only):
+ALLOWED ROLES (use EXACT names from this list):
 {allowed_roles}
 
 VALIDATION TASKS:
-1. Remove any technical_keywords not explicitly in the description
-2. Remove any tools not explicitly mentioned
-3. Replace any roles not in ALLOWED ROLES with closest match or remove
-4. If "Developer, full-stack" is present, remove "Developer, front-end" and "Developer, back-end"
-5. Verify domain and seniority are reasonable
+1. Verify all technical_keywords are reasonable (keep items that are mentioned or clearly implied)
+2. Check tools are actual developer/design tools (not cloud platforms)
+3. Map any roles NOT in ALLOWED ROLES to the closest match
+4. If "Developer, full-stack" is present, you can keep front-end/back-end if they're also needed
+5. Verify domain is specific (not "Technology" or "General" unless truly applicable)
+6. Check seniority level is reasonable
 
-Return the CORRECTED JSON with same schema. Add a "validation_notes" field listing changes made.
+IMPORTANT: Don't remove items unless they're clearly wrong. We want comprehensive extraction.
+
+Return the CORRECTED JSON with same schema. Add a "validation_notes" field listing any changes made.
 Return JSON only:"""
 
 
