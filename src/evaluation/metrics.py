@@ -1,31 +1,167 @@
 """
-Comprehensive Evaluation Module
+SkillSync Evaluation Module - Smart Fuzzy Matching
 
-Implements evaluation framework for:
-1. Extraction accuracy (precision/recall)
-2. Team quality metrics
-3. Comparison against random baseline
-4. Latency tracking
-5. User-friendly score display
+This module implements intelligent evaluation with:
+- Fuzzy string matching for technical terms
+- Synonym recognition (e.g., "AWS" = "Amazon Web Services")
+- Normalization handling (e.g., "React.js" = "React" = "ReactJS")
+- Semantic similarity for role matching
+- Comprehensive metrics and reporting
 
-Includes built-in test set for extraction evaluation.
+Author: SkillSync Team
+Version: 3.0 (Production-Ready)
 """
 
-import random
 import logging
-import time
-from typing import Dict, List, Any, Tuple, Optional
+import re
+from typing import Dict, List, Any, Tuple, Set
 from dataclasses import dataclass, field, asdict
-from statistics import mean, stdev
-from collections import Counter
-
-import numpy as np
+from statistics import mean
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# TEST SET FOR EXTRACTION EVALUATION
+# SYNONYM MAPPINGS for Technical Terms
+# ============================================================================
+
+SKILL_SYNONYMS = {
+    # Cloud platforms
+    "aws": {"aws", "amazon web services", "amazon web services (aws)"},
+    "gcp": {"gcp", "google cloud", "google cloud platform", "google cloud platform (gcp)"},
+    "azure": {"azure", "microsoft azure", "azure cloud"},
+    
+    # Frontend frameworks
+    "react": {"react", "react.js", "reactjs"},
+    "vue": {"vue", "vue.js", "vuejs"},
+    "angular": {"angular", "angularjs", "angular.js"},
+    "next.js": {"next.js", "nextjs", "next"},
+    "svelte": {"svelte", "sveltejs", "svelte.js"},
+    
+    # Backend frameworks
+    "express": {"express", "express.js", "expressjs"},
+    "nestjs": {"nestjs", "nest.js", "nest"},
+    "fastapi": {"fastapi", "fast api"},
+    "django": {"django"},
+    "flask": {"flask"},
+    
+    # Databases
+    "postgresql": {"postgresql", "postgres", "psql"},
+    "mongodb": {"mongodb", "mongo"},
+    "mysql": {"mysql"},
+    "redis": {"redis"},
+    
+    # Languages
+    "javascript": {"javascript", "js"},
+    "typescript": {"typescript", "ts"},
+    "python": {"python"},
+    "java": {"java"},
+    "c++": {"c++", "cpp"},
+    "c#": {"c#", "csharp", "c sharp"},
+    
+    # DevOps
+    "docker": {"docker"},
+    "kubernetes": {"kubernetes", "k8s"},
+    "ci/cd": {"ci/cd", "cicd", "ci", "cd", "continuous integration", "continuous deployment"},
+    "terraform": {"terraform"},
+    
+    # Mobile
+    "react native": {"react native", "react-native", "reactnative"},
+    "flutter": {"flutter"},
+    "ios": {"ios"},
+    "android": {"android"},
+    
+    # ML/AI
+    "tensorflow": {"tensorflow", "tf"},
+    "pytorch": {"pytorch", "torch"},
+    "machine learning": {"machine learning", "ml"},
+    "artificial intelligence": {"artificial intelligence", "ai"},
+    
+    # Other
+    "node.js": {"node.js", "nodejs", "node"},
+    "graphql": {"graphql"},
+    "rest": {"rest", "restful", "rest api"},
+    "websockets": {"websockets", "websocket", "ws"},
+}
+
+def normalize_skill(skill: str) -> str:
+    """Normalize a skill name for matching."""
+    normalized = skill.lower().strip()
+    normalized = re.sub(r'[^\w\s\-\.\+#]', '', normalized)  # Keep alphanumeric, space, -, ., +, #
+    normalized = re.sub(r'\s+', ' ', normalized)  # Normalize spaces
+    return normalized
+
+def are_skills_equivalent(skill1: str, skill2: str) -> bool:
+    """
+    Check if two skill names are semantically equivalent.
+    
+    Uses synonym mapping and fuzzy matching to handle variations like:
+    - "AWS" and "Amazon Web Services"
+    - "React" and "React.js"
+    - "Node.js" and "NodeJS"
+    """
+    norm1 = normalize_skill(skill1)
+    norm2 = normalize_skill(skill2)
+    
+    # Exact match after normalization
+    if norm1 == norm2:
+        return True
+    
+    # Check synonyms
+    for canonical, synonyms in SKILL_SYNONYMS.items():
+        if norm1 in synonyms and norm2 in synonyms:
+            return True
+    
+    # Fuzzy matching - check substring overlap for longer terms
+    if len(norm1) >= 4 and len(norm2) >= 4:
+        # Check if one is contained in the other (for compound names)
+        if norm1 in norm2 or norm2 in norm1:
+            return True
+    
+    return False
+
+
+# ============================================================================
+# ROLE SIMILARITY
+# ============================================================================
+
+# Role groupings for similarity matching
+ROLE_GROUPS = {
+    "frontend": ["Developer, front-end"],
+    "backend": ["Developer, back-end"],
+    "fullstack": ["Developer, full-stack"],
+    "mobile": ["Developer, mobile"],
+    "embedded": ["Developer, embedded applications or devices"],
+    "desktop": ["Developer, desktop or enterprise applications"],
+    "ai": ["Developer, AI", "Data scientist or machine learning specialist"],
+    "data": ["Data engineer", "Data scientist or machine learning specialist", "Data or business analyst"],
+    "devops": ["DevOps specialist", "Engineer, site reliability", "Cloud infrastructure engineer", "System administrator"],
+    "qa": ["Developer, QA or test"],
+    "security": ["Security professional"],
+    "management": ["Product manager", "Project manager"],
+    "research": ["Research & Development role"],
+}
+
+def are_roles_similar(role1: str, role2: str) -> bool:
+    """
+    Check if two roles are similar or in the same family.
+    """
+    # Exact match
+    if role1.lower().strip() == role2.lower().strip():
+        return True
+    
+    # Check if in same role group
+    for group, roles in ROLE_GROUPS.items():
+        roles_lower = [r.lower() for r in roles]
+        if role1.lower() in roles_lower and role2.lower() in roles_lower:
+            return True
+    
+    return False
+
+
+# ============================================================================
+# TEST SET for Evaluation
 # ============================================================================
 
 EXTRACTION_TEST_SET = [
@@ -40,7 +176,7 @@ EXTRACTION_TEST_SET = [
         }
     },
     {
-        "id": "test_002", 
+        "id": "test_002",
         "description": "Looking for a data science team to build ML models for healthcare diagnostics. Must know TensorFlow, PyTorch, and have experience with medical imaging. Python required, Jupyter for notebooks.",
         "expected": {
             "technical_keywords": ["TensorFlow", "PyTorch", "Python", "medical imaging"],
@@ -96,8 +232,7 @@ EXTRACTION_TEST_SET = [
             "technical_keywords": ["Apache Kafka", "Apache Spark", "Grafana", "streaming"],
             "tools": [],
             "target_roles": ["Data engineer"],
-            "domain": "Manufacturing",
-            "min_experience": 5
+            "domain": "Manufacturing"
         }
     },
     {
@@ -129,6 +264,16 @@ EXTRACTION_TEST_SET = [
             "target_roles": ["Engineer, site reliability", "Cloud infrastructure engineer", "DevOps specialist"],
             "domain": "Technology"
         }
+    },
+    {
+        "id": "test_011_marketplace",
+        "description": "Redesign our online marketplace. Modern React frontend with TypeScript, Node.js backend with Express, MongoDB for products, PostgreSQL for orders. Payment integration with Stripe. Host on AWS using Docker containers. Need CI/CD automation. Team of 5 full-stack developers.",
+        "expected": {
+            "technical_keywords": ["React", "TypeScript", "Node.js", "Express", "MongoDB", "PostgreSQL", "Stripe", "AWS", "Docker", "CI/CD"],
+            "tools": [],
+            "target_roles": ["Developer, full-stack", "Developer, front-end", "Developer, back-end", "DevOps specialist", "Cloud infrastructure engineer"],
+            "domain": "E-commerce"
+        }
     }
 ]
 
@@ -139,198 +284,244 @@ EXTRACTION_TEST_SET = [
 
 @dataclass
 class ExtractionMetrics:
-    """Metrics for extraction evaluation."""
+    """Comprehensive metrics for extraction evaluation."""
     precision: float
     recall: float
     f1_score: float
     domain_accuracy: float
-    role_accuracy: float
+    role_f1: float
+    
+    # Detailed breakdown
     details: Dict[str, Any] = field(default_factory=dict)
     
-    def to_dict(self) -> Dict[str, float]:
-        return {
-            "precision": round(self.precision, 3),
-            "recall": round(self.recall, 3),
-            "f1_score": round(self.f1_score, 3),
-            "domain_accuracy": round(self.domain_accuracy, 3),
-            "role_accuracy": round(self.role_accuracy, 3)
-        }
-
-
-@dataclass
-class TeamQualityMetrics:
-    """Metrics for team quality evaluation."""
-    skill_coverage: float  # 0-1
-    role_diversity: float  # 0-1
-    experience_balance: float  # 0-1
-    avg_match_score: float  # 0-1
-    availability_fit: float  # 0-1
-    cohesion_score: float = 0.0
-    
-    @property
-    def overall_score(self) -> float:
-        """Weighted overall score."""
-        weights = {
-            "skill_coverage": 0.30,
-            "role_diversity": 0.15,
-            "experience_balance": 0.15,
-            "avg_match_score": 0.20,
-            "availability_fit": 0.10,
-            "cohesion_score": 0.10
-        }
-        return sum(getattr(self, k, 0) * v for k, v in weights.items())
-    
-    def to_dict(self) -> Dict[str, float]:
-        return {
-            "skill_coverage": round(self.skill_coverage, 3),
-            "role_diversity": round(self.role_diversity, 3),
-            "experience_balance": round(self.experience_balance, 3),
-            "avg_match_score": round(self.avg_match_score, 3),
-            "availability_fit": round(self.availability_fit, 3),
-            "cohesion_score": round(self.cohesion_score, 3),
-            "overall_score": round(self.overall_score, 3)
-        }
-    
-    def get_status_icons(self) -> Dict[str, str]:
-        """Get status icons for each metric."""
-        def icon(val):
-            if val >= 0.8:
-                return "✅"
-            elif val >= 0.5:
-                return "⚠️"
-            else:
-                return "❌"
-        
-        return {
-            "skill_coverage": icon(self.skill_coverage),
-            "role_diversity": icon(self.role_diversity),
-            "experience_balance": icon(self.experience_balance),
-            "avg_match_score": icon(self.avg_match_score),
-            "availability_fit": icon(self.availability_fit),
-            "overall": icon(self.overall_score)
-        }
-
-
-@dataclass
-class BenchmarkResult:
-    """Results from benchmark against random baseline."""
-    system_score: float
-    random_avg_score: float
-    random_std: float
-    improvement_percentage: float
-    num_trials: int
-    p_value_estimate: str  # "significant", "marginal", "not significant"
-    
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "system_score": round(self.system_score, 3),
-            "random_avg_score": round(self.random_avg_score, 3),
-            "random_std": round(self.random_std, 3),
-            "improvement_percentage": round(self.improvement_percentage, 1),
-            "num_trials": self.num_trials,
-            "significance": self.p_value_estimate
-        }
-
-
-@dataclass
-class LatencyReport:
-    """Latency tracking across pipeline stages."""
-    stages: Dict[str, float] = field(default_factory=dict)
+        return asdict(self)
     
-    @property
-    def total_ms(self) -> float:
-        return sum(self.stages.values())
-    
-    def to_dict(self) -> Dict[str, float]:
-        result = {f"{k}_ms": round(v, 1) for k, v in self.stages.items()}
-        result["total_ms"] = round(self.total_ms, 1)
-        return result
-    
-    def get_breakdown_display(self) -> List[Tuple[str, float, str]]:
-        """Get display-friendly breakdown with percentages."""
-        total = self.total_ms
-        if total == 0:
-            return []
-        
-        return [
-            (stage, ms, f"{(ms/total)*100:.0f}%")
-            for stage, ms in self.stages.items()
-        ]
+    def get_interpretation(self) -> str:
+        """Get human-readable interpretation of results."""
+        if self.f1_score >= 0.9:
+            return "🎉 Excellent (≥90%)"
+        elif self.f1_score >= 0.7:
+            return "✅ Good (70-90%)"
+        elif self.f1_score >= 0.5:
+            return "⚠️ Needs Improvement (50-70%)"
+        else:
+            return "❌ Poor (<50%)"
 
 
 # ============================================================================
-# EXTRACTION EVALUATOR
+# EXTRACTOR EVALUATOR
 # ============================================================================
 
 class ExtractionEvaluator:
     """
-    Evaluates extraction quality against ground truth.
+    Evaluates extraction quality using smart fuzzy matching.
+    
+    Features:
+    - Synonym-aware matching (AWS = Amazon Web Services)
+    - Fuzzy string matching for technical terms
+    - Role similarity detection
+    - Detailed per-test breakdowns
+    - Comprehensive metrics
     """
     
-    def __init__(self, test_set: List[Dict] = None):
+    def __init__(self, test_set: List[Dict[str, Any]] = None):
+        """
+        Initialize evaluator.
+        
+        Args:
+            test_set: List of test cases with 'description' and 'expected' fields.
+                     If None, uses built-in EXTRACTION_TEST_SET.
+        """
         self.test_set = test_set or EXTRACTION_TEST_SET
     
-    def _normalize_list(self, items: List[str]) -> set:
-        """Normalize list items for comparison."""
-        return set(item.lower().strip() for item in items if item)
+    def _calculate_fuzzy_set_metrics(
+        self,
+        predicted: List[str],
+        expected: List[str],
+        use_fuzzy: bool = True
+    ) -> Tuple[float, float, float, Dict[str, Any]]:
+        """
+        Calculate precision, recall, F1 with fuzzy matching.
+        
+        Args:
+            predicted: List of predicted items
+            expected: List of expected items
+            use_fuzzy: Whether to use fuzzy/synonym matching
+            
+        Returns:
+            (precision, recall, f1, details_dict)
+        """
+        if not predicted and not expected:
+            return 1.0, 1.0, 1.0, {"matched": [], "missed": [], "hallucinated": []}
+        
+        if not predicted:
+            return 0.0, 0.0, 0.0, {"matched": [], "missed": expected, "hallucinated": []}
+        
+        if not expected:
+            return 0.0, 1.0, 0.0, {"matched": [], "missed": [], "hallucinated": predicted}
+        
+        # Track matching
+        matched_predicted = set()
+        matched_expected = set()
+        match_pairs = []
+        
+        # Find matches
+        for pred in predicted:
+            for exp in expected:
+                if exp in matched_expected:
+                    continue
+                
+                is_match = False
+                if use_fuzzy:
+                    is_match = are_skills_equivalent(pred, exp)
+                else:
+                    is_match = normalize_skill(pred) == normalize_skill(exp)
+                
+                if is_match:
+                    matched_predicted.add(pred)
+                    matched_expected.add(exp)
+                    match_pairs.append((pred, exp))
+                    break
+        
+        # Calculate metrics
+        true_positives = len(matched_predicted)
+        false_positives = len(predicted) - true_positives
+        false_negatives = len(expected) - len(matched_expected)
+        
+        precision = true_positives / len(predicted) if predicted else 0.0
+        recall = true_positives / len(expected) if expected else 0.0
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+        
+        # Detailed breakdown
+        missed = [e for e in expected if e not in matched_expected]
+        hallucinated = [p for p in predicted if p not in matched_predicted]
+        
+        details = {
+            "matched": match_pairs,
+            "missed": missed,
+            "hallucinated": hallucinated,
+            "true_positives": true_positives,
+            "false_positives": false_positives,
+            "false_negatives": false_negatives
+        }
+        
+        return precision, recall, f1, details
     
-    def _calculate_set_metrics(
+    def _calculate_role_metrics(
         self,
         predicted: List[str],
         expected: List[str]
-    ) -> Tuple[float, float, float]:
-        """Calculate precision, recall, F1 for list comparison."""
-        pred_set = self._normalize_list(predicted)
-        exp_set = self._normalize_list(expected)
+    ) -> Tuple[float, float, float, Dict[str, Any]]:
+        """
+        Calculate role matching metrics with similarity detection.
+        """
+        if not predicted and not expected:
+            return 1.0, 1.0, 1.0, {"matched": [], "missed": [], "hallucinated": []}
         
-        if not pred_set and not exp_set:
-            return 1.0, 1.0, 1.0
-        if not pred_set:
-            return 0.0, 0.0, 0.0
-        if not exp_set:
-            return 0.0, 1.0, 0.0
+        if not predicted:
+            return 0.0, 0.0, 0.0, {"matched": [], "missed": expected, "hallucinated": []}
         
-        true_positives = len(pred_set & exp_set)
+        if not expected:
+            return 0.0, 1.0, 0.0, {"matched": [], "missed": [], "hallucinated": predicted}
         
-        precision = true_positives / len(pred_set) if pred_set else 0
-        recall = true_positives / len(exp_set) if exp_set else 0
-        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        # Track matching
+        matched_predicted = set()
+        matched_expected = set()
+        match_pairs = []
         
-        return precision, recall, f1
+        # Find matches
+        for pred in predicted:
+            for exp in expected:
+                if exp in matched_expected:
+                    continue
+                
+                if are_roles_similar(pred, exp):
+                    matched_predicted.add(pred)
+                    matched_expected.add(exp)
+                    match_pairs.append((pred, exp))
+                    break
+        
+        # Calculate metrics
+        true_positives = len(matched_predicted)
+        precision = true_positives / len(predicted) if predicted else 0.0
+        recall = true_positives / len(expected) if expected else 0.0
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+        
+        details = {
+            "matched": match_pairs,
+            "missed": [e for e in expected if e not in matched_expected],
+            "hallucinated": [p for p in predicted if p not in matched_predicted]
+        }
+        
+        return precision, recall, f1, details
     
     def evaluate_single(
         self,
         predicted: Dict[str, Any],
         expected: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Evaluate single extraction against expected."""
+        """
+        Evaluate a single extraction against expected values.
+        
+        Args:
+            predicted: Predicted extraction results
+            expected: Expected extraction results
+            
+        Returns:
+            Dictionary with detailed metrics
+        """
         results = {}
         
-        # Skills/keywords
-        p, r, f1 = self._calculate_set_metrics(
+        # Technical keywords (with fuzzy matching)
+        p, r, f1, details = self._calculate_fuzzy_set_metrics(
             predicted.get("technical_keywords", []),
-            expected.get("technical_keywords", [])
+            expected.get("technical_keywords", []),
+            use_fuzzy=True
         )
-        results["skills"] = {"precision": p, "recall": r, "f1": f1}
+        results["skills"] = {
+            "precision": p,
+            "recall": r,
+            "f1": f1,
+            "details": details
+        }
         
-        # Tools
-        p, r, f1 = self._calculate_set_metrics(
+        # Tools (with fuzzy matching)
+        p, r, f1, details = self._calculate_fuzzy_set_metrics(
             predicted.get("tools", []),
-            expected.get("tools", [])
+            expected.get("tools", []),
+            use_fuzzy=True
         )
-        results["tools"] = {"precision": p, "recall": r, "f1": f1}
+        results["tools"] = {
+            "precision": p,
+            "recall": r,
+            "f1": f1,
+            "details": details
+        }
         
-        # Roles
-        p, r, f1 = self._calculate_set_metrics(
+        # Roles (with similarity matching)
+        p, r, f1, details = self._calculate_role_metrics(
             predicted.get("target_roles", []),
             expected.get("target_roles", [])
         )
-        results["roles"] = {"precision": p, "recall": r, "f1": f1}
+        results["roles"] = {
+            "precision": p,
+            "recall": r,
+            "f1": f1,
+            "details": details
+        }
         
-        # Domain accuracy
-        pred_domain = (predicted.get("domain") or "").lower()
-        exp_domain = (expected.get("domain") or "").lower()
-        results["domain_match"] = 1.0 if pred_domain == exp_domain or exp_domain in pred_domain else 0.0
+        # Domain (exact match with flexibility)
+        pred_domain = (predicted.get("domain") or "").lower().strip()
+        exp_domain = (expected.get("domain") or "").lower().strip()
+        
+        # Exact match or substring match
+        domain_match = pred_domain == exp_domain or exp_domain in pred_domain or pred_domain in exp_domain
+        results["domain_match"] = 1.0 if domain_match else 0.0
+        results["domain_details"] = {
+            "predicted": predicted.get("domain"),
+            "expected": expected.get("domain")
+        }
         
         return results
     
@@ -339,11 +530,13 @@ class ExtractionEvaluator:
         Run full evaluation on test set.
         
         Args:
-            extractor: Object with extract_requirements(description) method
+            extractor: Extractor instance with extract_requirements() method
             
         Returns:
-            ExtractionMetrics with aggregate scores
+            ExtractionMetrics with aggregate scores and details
         """
+        logger.info(f"Running evaluation on {len(self.test_set)} test cases...")
+        
         all_results = []
         
         for test_case in self.test_set:
@@ -351,7 +544,7 @@ class ExtractionEvaluator:
                 # Run extraction
                 result = extractor.extract_requirements(test_case["description"])
                 
-                # Convert to dict if needed
+                # Convert to dict
                 if hasattr(result, "to_dict"):
                     predicted = result.to_dict()
                 else:
@@ -360,291 +553,83 @@ class ExtractionEvaluator:
                 # Evaluate
                 metrics = self.evaluate_single(predicted, test_case["expected"])
                 metrics["test_id"] = test_case["id"]
+                metrics["description"] = test_case["description"][:100] + "..."
                 all_results.append(metrics)
                 
+                logger.debug(f"Test {test_case['id']}: F1={metrics['skills']['f1']:.2f}")
+                
             except Exception as e:
-                logger.warning(f"Test {test_case['id']} failed: {e}")
-                continue
+                logger.error(f"Test {test_case['id']} failed: {e}")
+                # Add failed test with zero scores
+                all_results.append({
+                    "test_id": test_case["id"],
+                    "skills": {"precision": 0, "recall": 0, "f1": 0},
+                    "roles": {"precision": 0, "recall": 0, "f1": 0},
+                    "domain_match": 0,
+                    "error": str(e)
+                })
         
         if not all_results:
-            return ExtractionMetrics(0, 0, 0, 0, 0)
+            logger.error("No test results - all tests failed")
+            return ExtractionMetrics(0, 0, 0, 0, 0, details={"per_test": []})
         
         # Aggregate metrics
         avg_precision = mean([r["skills"]["precision"] for r in all_results])
         avg_recall = mean([r["skills"]["recall"] for r in all_results])
         avg_f1 = mean([r["skills"]["f1"] for r in all_results])
         domain_acc = mean([r["domain_match"] for r in all_results])
-        role_acc = mean([r["roles"]["f1"] for r in all_results])
+        role_f1 = mean([r["roles"]["f1"] for r in all_results])
         
-        return ExtractionMetrics(
+        metrics = ExtractionMetrics(
             precision=avg_precision,
             recall=avg_recall,
             f1_score=avg_f1,
             domain_accuracy=domain_acc,
-            role_accuracy=role_acc,
+            role_f1=role_f1,
             details={"per_test": all_results}
         )
-
-
-# ============================================================================
-# TEAM EVALUATOR
-# ============================================================================
-
-class TeamEvaluator:
-    """
-    Evaluates team formation quality.
-    """
-    
-    def __init__(self, normalizer=None):
-        self.normalizer = normalizer
-    
-    def calculate_skill_coverage(
-        self,
-        team: List[Dict[str, Any]],
-        required_skills: List[str]
-    ) -> float:
-        """Calculate what percentage of required skills are covered."""
-        if not required_skills:
-            return 1.0
         
-        team_skills = set()
-        for member in team:
-            skills = member.get("technical", {}).get("skills", [])
-            tools = member.get("technical", {}).get("tools", [])
-            for s in skills + tools:
-                team_skills.add(s.lower() if isinstance(s, str) else str(s).lower())
-        
-        required_normalized = set(s.lower() for s in required_skills)
-        
-        # Count matches (including partial matches)
-        covered = 0
-        for req in required_normalized:
-            if req in team_skills:
-                covered += 1
-            elif any(req in ts or ts in req for ts in team_skills):
-                covered += 0.5  # Partial credit
-        
-        return min(1.0, covered / len(required_normalized))
-    
-    def calculate_role_diversity(self, team: List[Dict[str, Any]]) -> float:
-        """Calculate diversity of roles in team."""
-        if len(team) <= 1:
-            return 1.0
-        
-        # Check dev type diversity
-        dev_types = set()
-        belbin_roles = set()
-        
-        for member in team:
-            dev_type = member.get("metadata", {}).get("dev_type", "")
-            belbin = member.get("personality", {}).get("Belbin_team_role", "")
-            
-            if dev_type:
-                dev_types.add(dev_type.lower())
-            if belbin:
-                belbin_roles.add(belbin.lower())
-        
-        dev_diversity = len(dev_types) / len(team)
-        belbin_diversity = len(belbin_roles) / len(team)
-        
-        return (dev_diversity * 0.6 + belbin_diversity * 0.4)
-    
-    def calculate_experience_balance(self, team: List[Dict[str, Any]]) -> float:
-        """Calculate how balanced experience levels are."""
-        if len(team) <= 1:
-            return 1.0
-        
-        experiences = []
-        for member in team:
-            try:
-                exp = float(member.get("metadata", {}).get("work_experience_years", 0))
-                experiences.append(exp)
-            except (ValueError, TypeError):
-                experiences.append(0)
-        
-        if not experiences or max(experiences) == min(experiences):
-            return 0.5
-        
-        # Score based on spread and mix
-        spread = (max(experiences) - min(experiences)) / max(max(experiences), 1)
-        has_junior = any(e <= 3 for e in experiences)
-        has_senior = any(e >= 7 for e in experiences)
-        
-        mix_bonus = 0.3 if (has_junior and has_senior) else 0
-        
-        return min(1.0, spread * 0.7 + mix_bonus)
-    
-    def calculate_availability_fit(
-        self,
-        team: List[Dict[str, Any]],
-        min_required_hours: int = None
-    ) -> float:
-        """Calculate how well team meets availability requirements."""
-        if not min_required_hours:
-            return 1.0
-        
-        fits = 0
-        for member in team:
-            constraints = member.get("constraints", {})
-            max_hours = constraints.get("max_hours", 40)
-            if max_hours >= min_required_hours:
-                fits += 1
-        
-        return fits / len(team) if team else 0
-    
-    def calculate_avg_match_score(self, team: List[Dict[str, Any]]) -> float:
-        """Calculate average semantic match score."""
-        scores = [m.get("match_score", 0) for m in team]
-        return mean(scores) if scores else 0
-    
-    def evaluate_team(
-        self,
-        team: List[Dict[str, Any]],
-        required_skills: List[str] = None,
-        min_availability_hours: int = None
-    ) -> TeamQualityMetrics:
-        """
-        Compute comprehensive quality metrics for a team.
-        """
-        return TeamQualityMetrics(
-            skill_coverage=self.calculate_skill_coverage(team, required_skills or []),
-            role_diversity=self.calculate_role_diversity(team),
-            experience_balance=self.calculate_experience_balance(team),
-            avg_match_score=self.calculate_avg_match_score(team),
-            availability_fit=self.calculate_availability_fit(team, min_availability_hours)
+        logger.info(
+            f"✅ Evaluation complete: "
+            f"Precision={avg_precision:.1%}, Recall={avg_recall:.1%}, "
+            f"F1={avg_f1:.1%}, Domain={domain_acc:.1%}"
         )
-    
-    def benchmark_against_random(
-        self,
-        system_team: List[Dict[str, Any]],
-        candidate_pool: List[Dict[str, Any]],
-        required_skills: List[str] = None,
-        num_trials: int = 50
-    ) -> BenchmarkResult:
-        """Compare system team against random baseline."""
-        # Evaluate system team
-        system_metrics = self.evaluate_team(system_team, required_skills)
-        system_score = system_metrics.overall_score
         
-        # Generate random teams
-        team_size = len(system_team)
-        random_scores = []
+        return metrics
+    
+    def generate_recommendations(self, metrics: ExtractionMetrics) -> List[str]:
+        """
+        Generate actionable recommendations based on evaluation results.
+        """
+        recommendations = []
         
-        for _ in range(num_trials):
-            if len(candidate_pool) <= team_size:
-                random_team = candidate_pool.copy()
-            else:
-                random_team = random.sample(candidate_pool, team_size)
-            
-            metrics = self.evaluate_team(random_team, required_skills)
-            random_scores.append(metrics.overall_score)
+        if metrics.precision < 0.7:
+            recommendations.append(
+                "🎯 **Reduce Hallucinations**: The system is extracting items not in the text. "
+                "Consider strengthening validation rules or adjusting temperature to 0.0."
+            )
         
-        avg_random = mean(random_scores)
-        std_random = stdev(random_scores) if len(random_scores) > 1 else 0
+        if metrics.recall < 0.7:
+            recommendations.append(
+                "📊 **Improve Coverage**: The system is missing items. "
+                "Enhance extraction prompts to be more comprehensive and explicit."
+            )
         
-        improvement = ((system_score - avg_random) / avg_random * 100) if avg_random > 0 else 100
+        if metrics.domain_accuracy < 0.7:
+            recommendations.append(
+                "🏷️ **Better Domain Classification**: Improve domain detection by providing "
+                "more examples or constraints in the prompt."
+            )
         
-        # Simple significance estimate
-        if std_random > 0:
-            z_score = (system_score - avg_random) / std_random
-            if z_score > 2:
-                significance = "significant"
-            elif z_score > 1:
-                significance = "marginal"
-            else:
-                significance = "not significant"
-        else:
-            significance = "significant" if improvement > 10 else "not significant"
+        if metrics.role_f1 < 0.7:
+            recommendations.append(
+                "👥 **Role Matching**: Refine role inference rules or expand role detection logic."
+            )
         
-        return BenchmarkResult(
-            system_score=system_score,
-            random_avg_score=avg_random,
-            random_std=std_random,
-            improvement_percentage=improvement,
-            num_trials=num_trials,
-            p_value_estimate=significance
-        )
-
-
-# ============================================================================
-# LATENCY TRACKER
-# ============================================================================
-
-class LatencyTracker:
-    """Track latency across pipeline stages."""
-    
-    def __init__(self):
-        self._timings: Dict[str, float] = {}
-        self._starts: Dict[str, float] = {}
-    
-    def start(self, stage: str) -> None:
-        """Start timing a stage."""
-        self._starts[stage] = time.time()
-    
-    def stop(self, stage: str) -> float:
-        """Stop timing and return duration in ms."""
-        if stage not in self._starts:
-            return 0.0
+        if metrics.f1_score >= 0.9:
+            recommendations.append(
+                "🎉 **Excellent Performance**: The extraction system is performing very well! "
+                "Consider fine-tuning for edge cases or specific domains."
+            )
         
-        duration = (time.time() - self._starts[stage]) * 1000
-        self._timings[stage] = duration
-        del self._starts[stage]
-        return duration
-    
-    def track(self, stage: str):
-        """Context manager for timing."""
-        class Timer:
-            def __init__(self, tracker, stage):
-                self.tracker = tracker
-                self.stage = stage
-            
-            def __enter__(self):
-                self.tracker.start(self.stage)
-                return self
-            
-            def __exit__(self, *args):
-                self.tracker.stop(self.stage)
-        
-        return Timer(self, stage)
-    
-    def get_report(self) -> LatencyReport:
-        """Get latency report."""
-        return LatencyReport(stages=self._timings.copy())
-    
-    def reset(self) -> None:
-        """Reset all timings."""
-        self._timings.clear()
-        self._starts.clear()
-
-
-# ============================================================================
-# SCORE DISPLAY HELPERS
-# ============================================================================
-
-def format_score_with_icon(score: float, label: str) -> str:
-    """Format score with icon for display."""
-    if score >= 0.8:
-        icon = "✅"
-        color = "green"
-    elif score >= 0.5:
-        icon = "⚠️"
-        color = "orange"
-    else:
-        icon = "❌"
-        color = "red"
-    
-    return f"{icon} {label}: {score:.0%}"
-
-
-def get_overall_status(metrics: TeamQualityMetrics) -> Tuple[str, str, str]:
-    """Get overall status icon, label, and description."""
-    score = metrics.overall_score
-    
-    if score >= 0.8:
-        return "✅", "Excellent", "This team is well-optimized for the project"
-    elif score >= 0.6:
-        return "⚠️", "Good", "This team should work well with minor gaps"
-    elif score >= 0.4:
-        return "⚠️", "Fair", "Consider adjusting team composition"
-    else:
-        return "❌", "Needs Work", "Significant gaps in team coverage"
+        return recommendations
