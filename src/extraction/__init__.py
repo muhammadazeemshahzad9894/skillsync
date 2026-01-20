@@ -1,16 +1,28 @@
-"""
-SkillSync Extraction Module
+{
+type: "file_content",
+fileName: "src/extraction/__init__.py",
+content: """
+Extraction Module
 
-Exports:
-- LLMExtractor: Main extraction class
-- ProjectRequirements: Data class for extracted requirements
+Exports the LLM extractor and related configuration classes.
 """
 
-from .llm_extractor import LLMExtractor, ProjectRequirements, ALLOWED_ROLES, DOMAINS
+from .llm_extractor import (
+    ChainedLLMExtractor,
+    LLMExtractor,
+    ProjectRequirements,
+    ExtractionConfig,
+    ALLOWED_ROLES,
+    DOMAINS
+)
 
 __all__ = [
-    "LLMExtractor",
-    "ProjectRequirements",
-    "ALLOWED_ROLES",
-    "DOMAINS"
+    'ChainedLLMExtractor',
+    'LLMExtractor',
+    'ProjectRequirements',
+    'ExtractionConfig',
+    'ALLOWED_ROLES',
+    'DOMAINS'
 ]
+"""
+}
