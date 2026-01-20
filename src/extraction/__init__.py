@@ -1,7 +1,4 @@
-{
-type: "file_content",
-fileName: "src/extraction/__init__.py",
-content: """
+"""
 Extraction Module
 
 Exports the LLM extractor and related configuration classes.
@@ -24,5 +21,3 @@ __all__ = [
     'ALLOWED_ROLES',
     'DOMAINS'
 ]
-"""
-}

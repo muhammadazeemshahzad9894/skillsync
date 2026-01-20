@@ -133,6 +133,25 @@ class TeamExplanation:
     skill_coverage: Dict[str, List[str]]
     dynamics_summary: str
 
+    def to_markdown(self) -> str:
+        """Convert to display-ready markdown."""
+        md = f"{self.analysis}\n\n"
+        
+        if self.strengths:
+            md += "**Strengths:**\n"
+            for s in self.strengths:
+                md += f"- {s}\n"
+        
+        if self.risks:
+            md += "\n**Watch-outs:**\n"
+            for r in self.risks:
+                md += f"- {r}\n"
+        
+        if self.dynamics_summary:
+            md += f"\n*{self.dynamics_summary}*"
+        
+        return md
+
 
 # ============================================================================
 # MAIN EXTRACTOR CLASS
@@ -229,6 +248,7 @@ class ChainedLLMExtractor:
             
         except Exception as e:
             logger.error(f"❌ Extraction failed: {e}")
+            # Fallback
             return ProjectRequirements(
                 technical_keywords=[], tools=[], target_roles=[],
                 domain="General", seniority_level="Mixed", summary=description
@@ -280,10 +300,5 @@ class ChainedLLMExtractor:
         try: return int(val) if val is not None else None
         except: return None
 
-
-# ============================================================================
-# COMPATIBILITY ALIASES
-# ============================================================================
-
-# Alias for backward compatibility with imports expecting LLMExtractor
+# Alias for backward compatibility
 LLMExtractor = ChainedLLMExtractor
