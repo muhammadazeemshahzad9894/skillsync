@@ -1,7 +1,4 @@
-{
-type: "file_content",
-fileName: "llm_extractor.py",
-content: """
+"""
 Enhanced LLM Extraction Module
 
 Implements a robust, single-pass extraction strategy using OpenAI's JSON mode.
@@ -10,7 +7,6 @@ Focuses on reliability, speed, and strict schema adherence.
 
 import json
 import logging
-import re
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 
@@ -321,5 +317,3 @@ class ChainedLLMExtractor:
             return int(val) if val is not None else None
         except (ValueError, TypeError):
             return None
-"""
-}
