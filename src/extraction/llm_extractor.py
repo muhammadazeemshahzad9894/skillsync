@@ -3,6 +3,7 @@ Enhanced LLM Extraction Module
 
 Implements a robust, single-pass extraction strategy using OpenAI's JSON mode.
 Focuses on reliability, speed, and strict schema adherence.
+Compatibility: Includes aliases for backward compatibility with v1.
 """
 
 import json
@@ -28,7 +29,7 @@ class ExtractionConfig:
 
 
 # ============================================================================
-# ALLOWED ROLES
+# CONSTANTS & ALLOWED VALUES
 # ============================================================================
 
 ALLOWED_ROLES = [
@@ -51,6 +52,11 @@ ALLOWED_ROLES = [
     "Data or business analyst",
     "Research & Development role",
     "System administrator",
+]
+
+DOMAINS = [
+    "Fintech", "Healthcare", "E-commerce", "Education", 
+    "Gaming", "Cybersecurity", "Manufacturing", "Technology", "General"
 ]
 
 
@@ -147,8 +153,6 @@ class ChainedLLMExtractor:
         self.client = client
         self.config = config or ExtractionConfig()
         self.extra_headers = extra_headers or {}
-        
-        # Track extraction stages for debugging/evaluation
         self.last_extraction_stages: Dict[str, Any] = {}
     
     def _call_llm_json(
@@ -168,20 +172,15 @@ class ChainedLLMExtractor:
                 temperature=temperature,
                 max_tokens=self.config.max_tokens,
                 extra_headers=self.extra_headers,
-                response_format={"type": "json_object"}  # CRITICAL FIX
+                response_format={"type": "json_object"}
             )
             
             content = response.choices[0].message.content.strip()
-            
-            # Robust parsing in case the model returns markdown code blocks despite JSON mode
             if "```json" in content:
                 content = content.replace("```json", "").replace("```", "")
             
             return json.loads(content)
             
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to decode JSON from LLM: {e}")
-            raise
         except Exception as e:
             logger.error(f"LLM API call failed: {e}")
             raise
@@ -189,16 +188,13 @@ class ChainedLLMExtractor:
     def extract_requirements(
         self,
         description: str,
-        skip_enhance: bool = False  # Argument kept for compatibility, ignored
+        skip_enhance: bool = False
     ) -> ProjectRequirements:
-        """
-        Extract structured requirements from description.
-        """
+        """Extract structured requirements from description."""
         self.last_extraction_stages = {"description": description}
         
         try:
             logger.info("🔍 Extracting requirements (Single Pass)...")
-            
             user_prompt = f"Project Description:\n{description}\n\nExtract technical requirements into JSON."
             
             extracted_data = self._call_llm_json(
@@ -209,7 +205,7 @@ class ChainedLLMExtractor:
             
             self.last_extraction_stages["raw_output"] = extracted_data
             
-            # Sanitize and Validate Data Types
+            # Sanitize inputs to lists
             keywords = extracted_data.get("technical_keywords", [])
             if isinstance(keywords, str): keywords = [keywords]
             
@@ -219,8 +215,7 @@ class ChainedLLMExtractor:
             roles = extracted_data.get("target_roles", [])
             if isinstance(roles, str): roles = [roles]
             
-            # Create object with safe defaults
-            reqs = ProjectRequirements(
+            return ProjectRequirements(
                 technical_keywords=[str(k) for k in keywords if k],
                 tools=[str(t) for t in tools if t],
                 target_roles=[str(r) for r in roles if r],
@@ -232,19 +227,11 @@ class ChainedLLMExtractor:
                 min_availability_hours=self._safe_int(extracted_data.get("min_availability_hours"))
             )
             
-            logger.info(f"✅ Extraction success: {len(reqs.technical_keywords)} skills, {len(reqs.target_roles)} roles")
-            return reqs
-            
         except Exception as e:
-            logger.error(f"❌ Extraction failed completely: {e}")
-            # Fallback to prevent app crash, but log heavily
+            logger.error(f"❌ Extraction failed: {e}")
             return ProjectRequirements(
-                technical_keywords=[],
-                tools=[],
-                target_roles=[],
-                domain="General",
-                seniority_level="Mixed",
-                summary=description
+                technical_keywords=[], tools=[], target_roles=[],
+                domain="General", seniority_level="Mixed", summary=description
             )
 
     def generate_team_explanation(
@@ -256,8 +243,6 @@ class ChainedLLMExtractor:
         required_skills: List[str] = None
     ) -> TeamExplanation:
         """Generate structured team explanation."""
-        
-        # Prepare context
         team_summary = []
         for m in team_members:
             name = m.get("name", "Unknown")
@@ -267,25 +252,13 @@ class ChainedLLMExtractor:
         
         user_prompt = f"""
         Project: {project_summary}
-        Strategy: {strategy_name} ({strategy_rationale})
+        Strategy: {strategy_name}
         Required Skills: {', '.join(required_skills or [])}
-        
-        Team Members:
-        {chr(10).join(team_summary)}
-        
-        Provide a JSON analysis with keys: 
-        analysis (string), strengths (list), risks (list), 
-        skill_coverage (object with covered/missing lists), 
-        dynamics_summary (string).
+        Team: {chr(10).join(team_summary)}
         """
         
         try:
-            data = self._call_llm_json(
-                TEAM_EXPLANATION_SYSTEM_PROMPT,
-                user_prompt,
-                temperature=0.7
-            )
-            
+            data = self._call_llm_json(TEAM_EXPLANATION_SYSTEM_PROMPT, user_prompt, 0.7)
             return TeamExplanation(
                 analysis=data.get("analysis", "Analysis unavailable."),
                 strengths=data.get("strengths", []),
@@ -293,27 +266,24 @@ class ChainedLLMExtractor:
                 skill_coverage=data.get("skill_coverage", {"covered": [], "missing": []}),
                 dynamics_summary=data.get("dynamics_summary", "")
             )
-        except Exception as e:
-            logger.warning(f"Explanation generation failed: {e}")
-            return TeamExplanation(
-                analysis="Analysis unavailable due to error.",
-                strengths=[],
-                risks=[],
-                skill_coverage={"covered": [], "missing": []},
-                dynamics_summary=""
-            )
+        except Exception:
+            return TeamExplanation("Analysis unavailable.", [], [], {"covered":[],"missing":[]}, "")
 
     def get_extraction_stages(self) -> Dict[str, Any]:
         return self.last_extraction_stages
 
     def _safe_float(self, val: Any) -> Optional[float]:
-        try:
-            return float(val) if val is not None else None
-        except (ValueError, TypeError):
-            return None
+        try: return float(val) if val is not None else None
+        except: return None
 
     def _safe_int(self, val: Any) -> Optional[int]:
-        try:
-            return int(val) if val is not None else None
-        except (ValueError, TypeError):
-            return None
+        try: return int(val) if val is not None else None
+        except: return None
+
+
+# ============================================================================
+# COMPATIBILITY ALIASES
+# ============================================================================
+
+# Alias for backward compatibility with imports expecting LLMExtractor
+LLMExtractor = ChainedLLMExtractor
