@@ -81,7 +81,10 @@ from src.evaluation.metrics import (
     TeamQualityMetrics,
     format_score_with_icon,
     get_overall_status,
-    LatencyTracker
+    LatencyTracker,
+    ExtractionEvaluator,
+    EXTRACTION_TEST_SET,
+    ExtractionMetrics
 )
 from src.utils import format_experience, format_skills_list, safe_float
 
@@ -641,6 +644,238 @@ def render_talent_pool(engine):
 
 
 # ============================================================================
+# EVALUATION TAB
+# ============================================================================
+
+def render_evaluation(engine):
+    """Render extraction evaluation tab."""
+    st.header("📊 Extraction Evaluation")
+    st.markdown("""
+    Test the AI's ability to extract structured requirements from project descriptions.
+    Compares extraction results against **10 ground-truth test cases** covering different domains.
+    """)
+    
+    # Info about test set
+    with st.expander("ℹ️ About the Test Set", expanded=False):
+        st.markdown(f"""
+        **Test Coverage:**
+        - {len(EXTRACTION_TEST_SET)} diverse project descriptions
+        - Domains: Fintech, Healthcare, E-commerce, IoT, Education, Cybersecurity, Manufacturing, Gaming, AI, Cloud Infrastructure
+        - Measures: Technical skills, Tools, Roles, Domain classification
+        
+        **Metrics:**
+        - **Precision**: % of extracted items that are correct
+        - **Recall**: % of expected items that were found
+        - **F1 Score**: Harmonic mean of precision and recall
+        - **Domain/Role Accuracy**: Correct classification rate
+        """)
+    
+    st.markdown("---")
+    
+    # Run Evaluation Button
+    col1, col2, col3 = st.columns([2, 2, 1])
+    
+    with col1:
+        run_full_eval = st.button(
+            "🧪 Run Full Evaluation (10 tests)",
+            type="primary",
+            use_container_width=True
+        )
+    
+    with col2:
+        run_sample_eval = st.button(
+            "⚡ Run Quick Sample (3 tests)",
+            use_container_width=True
+        )
+    
+    # Run evaluation
+    if run_full_eval or run_sample_eval or 'eval_results' in st.session_state:
+        
+        # Perform evaluation if button clicked
+        if run_full_eval or run_sample_eval:
+            test_set = EXTRACTION_TEST_SET if run_full_eval else EXTRACTION_TEST_SET[:3]
+            
+            with st.spinner(f"🔬 Running {len(test_set)} extraction tests..."):
+                evaluator = ExtractionEvaluator(test_set=test_set)
+                
+                start_time = time.time()
+                results = evaluator.evaluate_extractor(engine.extractor)
+                elapsed_time = (time.time() - start_time) * 1000
+                
+                # Store in session state
+                st.session_state['eval_results'] = results
+                st.session_state['eval_time'] = elapsed_time
+                st.session_state['eval_num_tests'] = len(test_set)
+        
+        # Display results
+        if 'eval_results' in st.session_state:
+            results = st.session_state['eval_results']
+            elapsed_time = st.session_state.get('eval_time', 0)
+            num_tests = st.session_state.get('eval_num_tests', len(EXTRACTION_TEST_SET))
+            
+            st.success(f"✅ Evaluation complete! Tested {num_tests} cases in {elapsed_time:.0f}ms")
+            st.markdown("---")
+            
+            # === AGGREGATE METRICS ===
+            st.subheader("📈 Overall Performance")
+            
+            metric_cols = st.columns(5)
+            
+            with metric_cols[0]:
+                icon = "✅" if results.precision >= 0.7 else ("⚠️" if results.precision >= 0.5 else "❌")
+                st.metric(
+                    "Precision",
+                    f"{results.precision:.1%}",
+                    help="% of extracted items that are correct"
+                )
+                st.caption(f"{icon} Technical Skills")
+            
+            with metric_cols[1]:
+                icon = "✅" if results.recall >= 0.7 else ("⚠️" if results.recall >= 0.5 else "❌")
+                st.metric(
+                    "Recall",
+                    f"{results.recall:.1%}",
+                    help="% of expected items that were found"
+                )
+                st.caption(f"{icon} Coverage")
+            
+            with metric_cols[2]:
+                icon = "✅" if results.f1_score >= 0.7 else ("⚠️" if results.f1_score >= 0.5 else "❌")
+                st.metric(
+                    "F1 Score",
+                    f"{results.f1_score:.3f}",
+                    help="Balanced metric (harmonic mean)"
+                )
+                st.caption(f"{icon} Overall Quality")
+            
+            with metric_cols[3]:
+                icon = "✅" if results.domain_accuracy >= 0.8 else ("⚠️" if results.domain_accuracy >= 0.6 else "❌")
+                st.metric(
+                    "Domain Accuracy",
+                    f"{results.domain_accuracy:.1%}",
+                    help="Correct domain classification"
+                )
+                st.caption(f"{icon} Classification")
+            
+            with metric_cols[4]:
+                icon = "✅" if results.role_accuracy >= 0.7 else ("⚠️" if results.role_accuracy >= 0.5 else "❌")
+                st.metric(
+                    "Role F1",
+                    f"{results.role_accuracy:.3f}",
+                    help="Role extraction quality"
+                )
+                st.caption(f"{icon} Role Matching")
+            
+            # === INTERPRETATION ===
+            st.markdown("---")
+            st.subheader("💡 Interpretation")
+            
+            overall_score = (results.f1_score + results.domain_accuracy + results.role_accuracy) / 3
+            
+            if overall_score >= 0.75:
+                st.success(f"""
+                **🎉 Excellent Performance** ({overall_score:.1%})
+                
+                The extraction system is performing very well! It accurately identifies technical requirements,
+                classifies domains correctly, and matches roles effectively.
+                """)
+            elif overall_score >= 0.60:
+                st.warning(f"""
+                **✅ Good Performance** ({overall_score:.1%})
+                
+                The extraction system works well overall but could be improved. Check the detailed results
+                below to see specific areas for optimization.
+                """)
+            else:
+                st.error(f"""
+                **⚠️ Needs Improvement** ({overall_score:.1%})
+                
+                The extraction system is struggling with some test cases. Review the detailed per-test
+                results below to identify patterns in errors.
+                """)
+            
+            # === DETAILED RESULTS ===
+            st.markdown("---")
+            st.subheader("🔬 Per-Test Results")
+            
+            if results.details and "per_test" in results.details:
+                test_results = results.details["per_test"]
+                
+                # Create summary table
+                table_data = []
+                for i, test_result in enumerate(test_results):
+                    test_case = EXTRACTION_TEST_SET[i] if i < len(EXTRACTION_TEST_SET) else {}
+                    
+                    table_data.append({
+                        "Test ID": test_result.get("test_id", f"test_{i+1}"),
+                        "Domain": test_case.get("expected", {}).get("domain", "N/A"),
+                        "Skills F1": f"{test_result.get('skills', {}).get('f1', 0):.3f}",
+                        "Tools F1": f"{test_result.get('tools', {}).get('f1', 0):.3f}",
+                        "Roles F1": f"{test_result.get('roles', {}).get('f1', 0):.3f}",
+                        "Domain Match": "✅" if test_result.get("domain_match", 0) == 1.0 else "❌"
+                    })
+                
+                df_results = pd.DataFrame(table_data)
+                st.dataframe(df_results, use_container_width=True, hide_index=True)
+                
+                # Detailed view
+                with st.expander("📋 View Detailed Test Cases"):
+                    for i, test_result in enumerate(test_results):
+                        if i >= len(EXTRACTION_TEST_SET):
+                            continue
+                        
+                        test_case = EXTRACTION_TEST_SET[i]
+                        test_id = test_result.get("test_id")
+                        
+                        st.markdown(f"#### {test_id}")
+                        st.caption(f"**Description:** {test_case['description'][:200]}...")
+                        
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.markdown("**Expected:**")
+                            st.json({
+                                "skills": test_case["expected"].get("technical_keywords", [])[:5],
+                                "roles": test_case["expected"].get("target_roles", []),
+                                "domain": test_case["expected"].get("domain")
+                            })
+                        
+                        with col2:
+                            st.markdown("**Metrics:**")
+                            skills_metrics = test_result.get("skills", {})
+                            st.write(f"Skills - P: {skills_metrics.get('precision', 0):.2f}, R: {skills_metrics.get('recall', 0):.2f}, F1: {skills_metrics.get('f1', 0):.2f}")
+                            roles_metrics = test_result.get("roles", {})
+                            st.write(f"Roles - F1: {roles_metrics.get('f1', 0):.2f}")
+                            st.write(f"Domain: {'✅ Match' if test_result.get('domain_match') == 1.0 else '❌ Mismatch'}")
+                        
+                        st.markdown("---")
+            
+            # === RECOMMENDATIONS ===
+            st.markdown("---")
+            st.subheader("💡 Recommendations")
+            
+            recommendations = []
+            
+            if results.precision < 0.7:
+                recommendations.append("**Reduce Hallucinations**: The system is extracting items not in the text. Strengthen validation prompts.")
+            
+            if results.recall < 0.7:
+                recommendations.append("**Improve Coverage**: The system is missing items. Enhance extraction prompts to be more comprehensive.")
+            
+            if results.domain_accuracy < 0.8:
+                recommendations.append("**Better Domain Classification**: Improve domain detection by providing more examples or constraints.")
+            
+            if results.role_accuracy < 0.7:
+                recommendations.append("**Role Matching**: Refine role inference rules or expand the ALLOWED_ROLES list.")
+            
+            if not recommendations:
+                recommendations.append("**✅ System is performing well!** Continue monitoring on new test cases.")
+            
+            for rec in recommendations:
+                st.info(rec)
+
+
+# ============================================================================
 # MAIN APP
 # ============================================================================
 
@@ -694,10 +929,11 @@ OPENAI_MODEL=openai/gpt-4o-mini
         st.caption("Group 45 | 2025W")
     
     # Main tabs
-    tab1, tab2, tab3 = st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         "📊 Dashboard",
         "🔨 Team Builder",
-        "👥 Talent Pool"
+        "👥 Talent Pool",
+        "🧪 Evaluation"
     ])
     
     with tab1:
@@ -708,6 +944,9 @@ OPENAI_MODEL=openai/gpt-4o-mini
     
     with tab3:
         render_talent_pool(engine)
+    
+    with tab4:
+        render_evaluation(engine)
 
 
 if __name__ == "__main__":
