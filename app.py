@@ -238,23 +238,50 @@ def render_dashboard(engine):
     
     st.markdown("---")
     
-    # Quick Actions
-    st.subheader("🚀 Quick Actions")
-    col1, col2, col3 = st.columns(3)
+    # How SkillSync Works - Moved to top of dashboard
+    st.subheader("🧠 How SkillSync Works")
+    
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        if st.button("🔨 Build a Team", use_container_width=True, type="primary"):
-            st.session_state["active_tab"] = 1
-            st.rerun()
+        st.markdown("""
+        **1️⃣ Describe Project**
+        
+        Tell us what you're building in plain English. Mention the technologies, 
+        domain, and team size you need.
+        """)
     
     with col2:
-        if st.button("📤 Upload Candidates", use_container_width=True):
-            st.session_state["active_tab"] = 2
-            st.rerun()
+        st.markdown("""
+        **2️⃣ AI Extracts Needs**
+        
+        Our AI identifies required skills, roles, and expertise from your description
+        using advanced language models.
+        """)
     
     with col3:
-        if st.button("🔄 Refresh Data", use_container_width=True):
-            st.cache_resource.clear()
+        st.markdown("""
+        **3️⃣ Smart Matching**
+        
+        Candidates are ranked by semantic similarity to your needs using 
+        embedding-based matching.
+        """)
+    
+    with col4:
+        st.markdown("""
+        **4️⃣ Team Formation**
+        
+        Get 3 optimized team options (Expert, Balanced, Diverse) with 
+        AI-generated explanations and quality metrics.
+        """)
+    
+    st.markdown("---")
+    
+    # CTA Button
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        if st.button("🚀 Start Building Teams", use_container_width=True, type="primary"):
+            st.session_state["active_tab"] = 1
             st.rerun()
     
     st.markdown("---")
@@ -281,40 +308,6 @@ def render_dashboard(engine):
             for k, v in sorted(industries_count.items(), key=lambda x: -x[1])[:8]
         ])
         st.bar_chart(ind_df.set_index("Industry"))
-    
-    # How It Works Section
-    st.markdown("---")
-    st.subheader("🧠 How SkillSync Works")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.markdown("""
-        **1️⃣ Describe Project**
-        
-        Tell us what you're building in plain English.
-        """)
-    
-    with col2:
-        st.markdown("""
-        **2️⃣ AI Extracts Needs**
-        
-        Our AI identifies required skills, roles, and expertise.
-        """)
-    
-    with col3:
-        st.markdown("""
-        **3️⃣ Smart Matching**
-        
-        Candidates are ranked by semantic similarity to your needs.
-        """)
-    
-    with col4:
-        st.markdown("""
-        **4️⃣ Team Formation**
-        
-        Get 3 optimized team options with explanations.
-        """)
 
 
 # ============================================================================
@@ -333,9 +326,9 @@ def render_team_builder(engine):
         with col1:
             project_desc = st.text_area(
                 "📝 Project Description",
-                height=120,
-                placeholder="Example: Build a Fintech mobile app with React Native, Python backend on AWS. Need payment integration and security expertise.",
-                help="Describe your project in plain language. Mention technologies, domain, and any specific requirements."
+                height=150,
+                placeholder="""Example: We need to build a mobile banking app for iOS and Android. The frontend should use React Native for cross-platform development. Backend services will be built with Python and FastAPI. We need PostgreSQL for transactional data and Redis for caching. The app must integrate with payment gateways. Team of 5 developers needed.""",
+                help="Describe your project in plain language. Mention technologies, frameworks, databases, cloud platforms, tools, and team size."
             )
         
         with col2:
@@ -903,11 +896,8 @@ OPENAI_MODEL=openai/gpt-4o-mini
         st.caption("Intelligent Team Formation")
         st.markdown("---")
         
-        # Stats
-        st.metric("📊 Candidates", engine.candidate_count)
-        
-        # Quick actions
-        if st.button("🔄 Refresh", use_container_width=True):
+        # Quick action
+        if st.button("🔄 Refresh Data", use_container_width=True):
             st.cache_resource.clear()
             st.rerun()
         
